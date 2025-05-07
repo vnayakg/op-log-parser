@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestOplogToSQL(t *testing.T) {
+func TestOplogToInsertSQL(t *testing.T) {
 	testCases := []struct {
 		name        string
 		inputJSON   string
@@ -41,6 +41,80 @@ func TestOplogToSQL(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			actualSQL, err := parseInsertOpLog(tc.inputJSON)
+
+			if tc.expectError {
+				if err == nil {
+					t.Errorf("Expected an error, but got nil")
+				} else if tc.err.Error() != err.Error() {
+					t.Errorf("Expected error message to contain '%s', but got '%s'", tc.err, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Did not expect an error, but got: %v", err)
+				}
+				if !reflect.DeepEqual(actualSQL, tc.expectedSQL) {
+					if actualSQL != tc.expectedSQL {
+						t.Errorf("Expected SQL:\n%s\nGot SQL:\n%s", tc.expectedSQL, actualSQL)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestOplogToUpdateSQL(t *testing.T) {
+	testCases := []struct {
+		name        string
+		inputJSON   string
+		expectedSQL string
+		expectError bool
+		err         error
+	}{
+		{
+			name: "Valid update set field",
+			inputJSON: `{
+				"op": "u",
+				"ns": "test.student",
+				"o": {
+					"$v": 2,
+					"diff": {
+						"u": {
+							"is_graduated": true
+						}
+					}
+				},
+				"o2": {
+					"_id": "635b79e231d82a8ab1de863b"
+				}
+			}`,
+			expectedSQL: "UPDATE test.student SET is_graduated = true WHERE _id = '635b79e231d82a8ab1de863b';",
+			expectError: false,
+		},
+		{
+			name: "Valid update unset field",
+			inputJSON: `{
+				"op": "u",
+				"ns": "test.student",
+				"o": {
+					"$v": 2,
+					"diff": {
+						"d": {
+							"roll_no": false
+						}
+					}
+				},
+				"o2": {
+					"_id": "635b79e231d82a8ab1de863b"
+				}
+			}`,
+			expectedSQL: "UPDATE test.student SET roll_no = NULL WHERE _id = '635b79e231d82a8ab1de863b';",
+			expectError: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actualSQL, err := parseUpdateOpLog(tc.inputJSON)
 
 			if tc.expectError {
 				if err == nil {

@@ -11,6 +11,11 @@ type OpLog struct {
 	Operation string         `json:"op"`
 	Namespace string         `json:"ns"`
 	Data      map[string]any `json:"o"`
+	O2        *O2Field       `json:"o2,omitempty"`
+}
+
+type O2Field struct {
+	ID string `json:"_id"`
 }
 
 func parseInsertOpLog(opLogJson string) (string, error) {
@@ -37,6 +42,42 @@ func parseInsertOpLog(opLogJson string) (string, error) {
 	return statement, nil
 }
 
+func parseUpdateOpLog(opLogJson string) (string, error) {
+	var updateLog OpLog
+	if err := json.Unmarshal([]byte(opLogJson), &updateLog); err != nil {
+		return "", err
+	}
+
+	diff := updateLog.Data["diff"].(map[string]any)
+	schema, table, err := parseNamespace(updateLog.Namespace)
+	if err != nil {
+		return "", err
+	}
+	id := updateLog.O2.ID
+
+	if u, ok := diff["u"]; ok {
+		setFields := u.(map[string]any)
+		var sets []string
+		for field, value := range setFields {
+			sets = append(sets, fmt.Sprintf("%s = %s", field, formatValue(value)))
+		}
+		return fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
+			schema, table, strings.Join(sets, ", "), id), nil
+	}
+
+	if d, ok := diff["d"]; ok {
+		unsetFields := d.(map[string]any)
+		var sets []string
+		for field := range unsetFields {
+			sets = append(sets, fmt.Sprintf("%s = NULL", field))
+		}
+		return fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
+			schema, table, strings.Join(sets, ", "), id), nil
+	}
+
+	return "", fmt.Errorf("unsupported update format")
+}
+
 func parseNamespace(namespace string) (schema, table string, err error) {
 	parts := strings.Split(namespace, ".")
 	if len(parts) != 2 {
@@ -56,16 +97,7 @@ func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
 
 	for _, colName := range columns {
 		value := opLog.Data[colName]
-		switch v := value.(type) {
-		case string:
-			values = append(values, fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''")))
-		case bool:
-			values = append(values, fmt.Sprintf("%t", v))
-		case float64:
-			values = append(values, fmt.Sprintf("%v", v))
-		default:
-			return "", fmt.Errorf("unsupported data type for key %s: %T", colName, v)
-		}
+		values = append(values, formatValue(value))
 	}
 
 	sqlStatement := fmt.Sprintf(
@@ -76,4 +108,20 @@ func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
 		strings.Join(values, ", "),
 	)
 	return sqlStatement, nil
+}
+
+func formatValue(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return fmt.Sprintf("'%s'", val)
+	case bool:
+		return fmt.Sprintf("%t", val)
+	case float64:
+		if val == float64(int(val)) {
+			return fmt.Sprintf("%d", int(val))
+		}
+		return fmt.Sprintf("%f", val)
+	default:
+		return fmt.Sprintf("'%v'", val)
+	}
 }

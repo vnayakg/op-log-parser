@@ -66,6 +66,8 @@ func parseUpdateOpLog(opLog OpLog) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	var setClauses []string
+
 	id := opLog.O2.ID
 	if u, ok := diff["u"]; ok {
 		setFields := u.(map[string]any)
@@ -73,9 +75,10 @@ func parseUpdateOpLog(opLog OpLog) (string, error) {
 		for field, value := range setFields {
 			sets = append(sets, fmt.Sprintf("%s = %s", field, formatValue(value)))
 		}
-		sort.Strings(sets)
-		return fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
-			schema, table, strings.Join(sets, ", "), id), nil
+		if len(sets) > 0 {
+			sort.Strings(sets)
+			setClauses = append(setClauses, sets...)
+		}
 	}
 
 	if d, ok := diff["d"]; ok {
@@ -84,12 +87,14 @@ func parseUpdateOpLog(opLog OpLog) (string, error) {
 		for field := range unsetFields {
 			sets = append(sets, fmt.Sprintf("%s = NULL", field))
 		}
-		sort.Strings(sets)
-		return fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
-			schema, table, strings.Join(sets, ", "), id), nil
-	}
+		if len(sets) > 0 {
+			sort.Strings(sets)
+			setClauses = append(setClauses, sets...)
+		}
 
-	return "", fmt.Errorf("unsupported update format")
+	}
+	return fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
+		schema, table, strings.Join(setClauses, ", "), id), nil
 }
 
 func parseDeleteOpLog(opLog OpLog) (string, error) {

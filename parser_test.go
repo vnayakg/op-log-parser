@@ -108,6 +108,22 @@ func TestParse(t *testing.T) {
 			expectedErr: nil,
 		},
 		{
+			name: "Update: Valid set and unset fields (sorted, set then unset internally)",
+			inputJSON: `{
+                "op": "u",
+                "ns": "test.student",
+                "o": {
+                    "diff": {
+                        "u": { "name": "Updated Name", "status": "active" },
+                        "d": { "old_field": true, "temp_data": 1 }
+                    }
+                },
+                "o2": { "_id": "idXYZ" }
+            }`,
+			expectedSQL: "UPDATE test.student SET name = 'Updated Name', status = 'active', old_field = NULL, temp_data = NULL WHERE _id = 'idXYZ';",
+			expectedErr: nil,
+		},
+		{
 			name: "Delete: Valid oplog entry",
 			inputJSON: `{
                 "op": "d",

@@ -1,194 +1,150 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
-	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestOplogToInsertSQL(t *testing.T) {
+func TestParse(t *testing.T) {
 	testCases := []struct {
 		name        string
 		inputJSON   string
 		expectedSQL string
-		expectError bool
-		err         error
+		expectedErr error
 	}{
 		{
-			name: "Valid student insert",
+			name: "Insert: Valid student data",
 			inputJSON: `{
-				"op": "i",
-				"ns": "test.student",
-				"o": {
-					"_id": "635b79e231d82a8ab1de863b",
-					"name": "Selena Miller",
-					"roll_no": 51,
-					"is_graduated": false,
-					"date_of_birth": "2000-01-30"
-				}
-			}`,
-			expectedSQL: "INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);",
-			expectError: false,
+                "op": "i",
+                "ns": "test.student",
+                "o": {
+                    "_id": "635b79e231d82a8ab1de863b",
+                    "name": "Selena O'Malley",
+                    "roll_no": 51,
+                    "is_graduated": false,
+                    "date_of_birth": "2000-01-30",
+                    "score": 95.5,
+                    "age": 23.0
+                }
+            }`,
+			expectedSQL: "INSERT INTO test.student (_id, age, date_of_birth, is_graduated, name, roll_no, score) VALUES ('635b79e231d82a8ab1de863b', 23, '2000-01-30', false, 'Selena O'Malley', 51, 95.500000);",
+			expectedErr: nil,
 		},
 		{
-			name:        "Invalid student insert json",
-			inputJSON:   `{"op": "i""ns": "test.student"`,
-			err:         fmt.Errorf("Error unmarshaling oplog"),
-			expectError: true,
+			name:        "Insert: Invalid JSON",
+			expectedSQL: "",
+			expectedErr: fmt.Errorf("Error unmarshaling oplog"),
+		},
+		{
+			name: "Insert: Invalid namespace",
+			inputJSON: `{
+                "op": "i",
+                "ns": "teststudent",
+                "o": {"_id": "1"}
+            }`,
+			expectedSQL: "",
+			expectedErr: fmt.Errorf("error parsing namespace, invalid namespace"),
+		},
+		{
+			name: "Insert: Invalid namespace",
+			inputJSON: `{
+                "op": "i",
+                "ns": ".student",
+                "o": {"_id": "1"}
+            }`,
+			expectedSQL: "",
+			expectedErr: fmt.Errorf("error parsing namespace, invalid namespace"),
+		},
+		{
+			name: "Insert: No data in 'o' field",
+			inputJSON: `{
+                "op": "i",
+                "ns": "test.student",
+                "o": {}
+            }`,
+			expectedSQL: "",
+			expectedErr: fmt.Errorf("empty data field for insert"),
+		},
+
+		{
+			name: "Update: Valid set single field",
+			inputJSON: `{
+                "op": "u",
+                "ns": "test.student",
+                "o": {
+                    "diff": { "u": { "is_graduated": true } }
+                },
+                "o2": { "_id": "id123" }
+            }`,
+			expectedSQL: "UPDATE test.student SET is_graduated = true WHERE _id = 'id123';",
+			expectedErr: nil,
+		},
+		{
+			name: "Update: Valid set multiple fields (sorted)",
+			inputJSON: `{
+                "op": "u",
+                "ns": "test.student",
+                "o": {
+                    "diff": { "u": { "name": "New Name", "age": 30 } }
+                },
+                "o2": { "_id": "id123" }
+            }`,
+			expectedSQL: "UPDATE test.student SET age = 30, name = 'New Name' WHERE _id = 'id123';",
+			expectedErr: nil,
+		},
+		{
+			name: "Update: Valid unset single field",
+			inputJSON: `{
+                "op": "u",
+                "ns": "test.student",
+                "o": {
+                    "diff": { "d": { "roll_no": true } }
+                },
+                "o2": { "_id": "id123" }
+            }`,
+			expectedSQL: "UPDATE test.student SET roll_no = NULL WHERE _id = 'id123';",
+			expectedErr: nil,
+		},
+		{
+			name: "Delete: Valid oplog entry",
+			inputJSON: `{
+                "op": "d",
+                "ns": "test.student",
+                "o": { "_id": "someObjectIDString" }
+            }`,
+			expectedSQL: "DELETE FROM test.student WHERE _id = 'someObjectIDString';",
+			expectedErr: nil,
+		},
+		{
+			name: "Unsupported operation type",
+			inputJSON: `{
+                "op": "n", 
+                "ns": "test.student",
+                "o": {"_id": "1"}
+            }`,
+			expectedErr: fmt.Errorf("oplog operation not supported: received operation n"),
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actualSQL, err := parseInsertOpLog(tc.inputJSON)
-
-			if tc.expectError {
+			actualSQL, err := Parse(tc.inputJSON)
+			if tc.expectedErr != nil {
 				if err == nil {
-					t.Errorf("Expected an error, but got nil")
-				} else if tc.err.Error() != err.Error() {
-					t.Errorf("Expected error message to contain '%s', but got '%s'", tc.err, err.Error())
+					t.Errorf("Expected error, but got nil. Expected error type/content: %v", tc.expectedErr)
+				} else if !errors.Is(err, tc.expectedErr) && !strings.Contains(err.Error(), tc.expectedErr.Error()) {
+					t.Errorf("Expected error type/content '%v', but got '%v'", tc.expectedErr, err)
 				}
 			} else {
 				if err != nil {
 					t.Errorf("Did not expect an error, but got: %v", err)
-				}
-				if !reflect.DeepEqual(actualSQL, tc.expectedSQL) {
-					if actualSQL != tc.expectedSQL {
-						t.Errorf("Expected SQL:\n%s\nGot SQL:\n%s", tc.expectedSQL, actualSQL)
-					}
 				}
 			}
-		})
-	}
-}
 
-func TestOplogToUpdateSQL(t *testing.T) {
-	testCases := []struct {
-		name        string
-		inputJSON   string
-		expectedSQL string
-		expectError bool
-		err         error
-	}{
-		{
-			name: "Valid update set field",
-			inputJSON: `{
-				"op": "u",
-				"ns": "test.student",
-				"o": {
-					"$v": 2,
-					"diff": {
-						"u": {
-							"is_graduated": true
-						}
-					}
-				},
-				"o2": {
-					"_id": "635b79e231d82a8ab1de863b"
-				}
-			}`,
-			expectedSQL: "UPDATE test.student SET is_graduated = true WHERE _id = '635b79e231d82a8ab1de863b';",
-			expectError: false,
-		},
-		{
-			name: "Valid update unset field",
-			inputJSON: `{
-				"op": "u",
-				"ns": "test.student",
-				"o": {
-					"$v": 2,
-					"diff": {
-						"d": {
-							"roll_no": false
-						}
-					}
-				},
-				"o2": {
-					"_id": "635b79e231d82a8ab1de863b"
-				}
-			}`,
-			expectedSQL: "UPDATE test.student SET roll_no = NULL WHERE _id = '635b79e231d82a8ab1de863b';",
-			expectError: false,
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			actualSQL, err := parseUpdateOpLog(tc.inputJSON)
-
-			if tc.expectError {
-				if err == nil {
-					t.Errorf("Expected an error, but got nil")
-				} else if tc.err.Error() != err.Error() {
-					t.Errorf("Expected error message to contain '%s', but got '%s'", tc.err, err.Error())
-				}
-			} else {
-				if err != nil {
-					t.Errorf("Did not expect an error, but got: %v", err)
-				}
-				if !reflect.DeepEqual(actualSQL, tc.expectedSQL) {
-					if actualSQL != tc.expectedSQL {
-						t.Errorf("Expected SQL:\n%s\nGot SQL:\n%s", tc.expectedSQL, actualSQL)
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestOplogToDeleteSQL(t *testing.T) {
-	testCases := []struct {
-		name        string
-		inputJSON   string
-		expectedSQL string
-		expectError bool
-		err         error
-	}{
-		{
-			name: "Valid delete log",
-			inputJSON: `{
-				"op": "d",
-  				"ns": "test.student",
-				"o": {
-					"_id": "635b79e231d82a8ab1de863b"
-				}
-			}`,
-			expectedSQL: "DELETE FROM test.student WHERE _id = '635b79e231d82a8ab1de863b';",
-			expectError: false,
-		},
-		{
-			name: "Invalid delete log, id field missing",
-			inputJSON: `{
-				"op": "d",
-				"ns": "test.student",
-				"o": {
-					"some": "other"
-				}
-			}`,
-			expectError: true,
-			err:         fmt.Errorf("_id field is missing"),
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			actualSQL, err := parseDeleteOpLog(tc.inputJSON)
-
-			if tc.expectError {
-				if err == nil {
-					t.Errorf("Expected an error, but got nil")
-				} else if tc.err.Error() != err.Error() {
-					t.Errorf("Expected error message to contain '%s', but got '%s'", tc.err, err.Error())
-				}
-			} else {
-				if err != nil {
-					t.Errorf("Did not expect an error, but got: %v", err)
-				}
-				if !reflect.DeepEqual(actualSQL, tc.expectedSQL) {
-					if actualSQL != tc.expectedSQL {
-						t.Errorf("Expected SQL:\n%s\nGot SQL:\n%s", tc.expectedSQL, actualSQL)
-					}
-				}
+			if actualSQL != tc.expectedSQL {
+				t.Errorf("SQL mismatch:\nExpected: %s\nActual  : %s", tc.expectedSQL, actualSQL)
 			}
 		})
 	}

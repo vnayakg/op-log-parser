@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+const (
+	Insert = "i"
+	Update = "u"
+	Delete = "d"
+)
+
 type OpLog struct {
 	Operation string         `json:"op"`
 	Namespace string         `json:"ns"`
@@ -18,20 +24,32 @@ type O2Field struct {
 	ID string `json:"_id"`
 }
 
-func parseInsertOpLog(opLogJson string) (string, error) {
+func Parse(opLogJson string) (string, error) {
 	var opLog OpLog
-	err := json.Unmarshal([]byte(opLogJson), &opLog)
-	if err != nil {
+	if err := json.Unmarshal([]byte(opLogJson), &opLog); err != nil {
 		return "", fmt.Errorf("Error unmarshaling oplog")
 	}
 
-	if opLog.Operation != "i" {
-		return "", fmt.Errorf("oplog operation not supported")
+	switch opLog.Operation {
+	case Insert:
+		return parseInsertOpLog(opLog)
+	case Update:
+		return parseUpdateOpLog(opLog)
+	case Delete:
+		return parseDeleteOpLog(opLog)
+	default:
+		return "", fmt.Errorf("oplog operation not supported: received operation %s", opLog.Operation)
 	}
+}
 
+func parseInsertOpLog(opLog OpLog) (string, error) {
 	schema, table, err := parseNamespace(opLog.Namespace)
 	if err != nil {
 		return "", err
+	}
+
+	if len(opLog.Data) == 0 {
+		return "", fmt.Errorf("empty data field for insert")
 	}
 
 	statement, err := prepareInsertStatement(schema, table, opLog)
@@ -42,25 +60,20 @@ func parseInsertOpLog(opLogJson string) (string, error) {
 	return statement, nil
 }
 
-func parseUpdateOpLog(opLogJson string) (string, error) {
-	var updateLog OpLog
-	if err := json.Unmarshal([]byte(opLogJson), &updateLog); err != nil {
-		return "", err
-	}
-
-	diff := updateLog.Data["diff"].(map[string]any)
-	schema, table, err := parseNamespace(updateLog.Namespace)
+func parseUpdateOpLog(opLog OpLog) (string, error) {
+	diff := opLog.Data["diff"].(map[string]any)
+	schema, table, err := parseNamespace(opLog.Namespace)
 	if err != nil {
 		return "", err
 	}
-	id := updateLog.O2.ID
-
+	id := opLog.O2.ID
 	if u, ok := diff["u"]; ok {
 		setFields := u.(map[string]any)
 		var sets []string
 		for field, value := range setFields {
 			sets = append(sets, fmt.Sprintf("%s = %s", field, formatValue(value)))
 		}
+		sort.Strings(sets)
 		return fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
 			schema, table, strings.Join(sets, ", "), id), nil
 	}
@@ -71,6 +84,7 @@ func parseUpdateOpLog(opLogJson string) (string, error) {
 		for field := range unsetFields {
 			sets = append(sets, fmt.Sprintf("%s = NULL", field))
 		}
+		sort.Strings(sets)
 		return fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
 			schema, table, strings.Join(sets, ", "), id), nil
 	}
@@ -78,16 +92,12 @@ func parseUpdateOpLog(opLogJson string) (string, error) {
 	return "", fmt.Errorf("unsupported update format")
 }
 
-func parseDeleteOpLog(opLogJson string) (string, error) {
-	var deleteLog OpLog
-	if err := json.Unmarshal([]byte(opLogJson), &deleteLog); err != nil {
-		return "", err
-	}
-	id, ok := deleteLog.Data["_id"]
+func parseDeleteOpLog(opLog OpLog) (string, error) {
+	id, ok := opLog.Data["_id"]
 	if !ok {
 		return "", fmt.Errorf("_id field is missing")
 	}
-	schema, table, err := parseNamespace(deleteLog.Namespace)
+	schema, table, err := parseNamespace(opLog.Namespace)
 	if err != nil {
 		return "", err
 	}
@@ -100,7 +110,7 @@ func prepareDeleteStatement(schema, table, id string) string {
 
 func parseNamespace(namespace string) (schema, table string, err error) {
 	parts := strings.Split(namespace, ".")
-	if len(parts) != 2 {
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", fmt.Errorf("error parsing namespace, invalid namespace")
 	}
 	return parts[0], parts[1], nil
@@ -130,7 +140,7 @@ func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
 	return sqlStatement, nil
 }
 
-func formatValue(v interface{}) string {
+func formatValue(v any) string {
 	switch val := v.(type) {
 	case string:
 		return fmt.Sprintf("'%s'", val)

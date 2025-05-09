@@ -30,51 +30,62 @@ type O2Field struct {
 }
 
 func Parse(opLogJson string) ([]string, error) {
-	var opLog OpLog
-	if err := json.Unmarshal([]byte(opLogJson), &opLog); err != nil {
+	var opLogs []OpLog
+	if err := json.Unmarshal([]byte(opLogJson), &opLogs); err != nil {
 		return nil, fmt.Errorf("Error unmarshaling oplog")
 	}
+	var allSqlStatements []string
+	ddlGeneratedTracker := make(map[string]bool)
+	for _, opLog := range opLogs {
 
-	switch opLog.Operation {
-	case Insert:
-		return parseInsertOpLog(opLog)
-	case Update:
-		statement, err := parseUpdateOpLog(opLog)
-		if err != nil {
-			return nil, err
+		switch opLog.Operation {
+		case Insert:
+			if !ddlGeneratedTracker[opLog.Namespace] {
+				schemaStatement, tableStatement, err := prepareTableDDL(opLog)
+				if err != nil {
+					return nil, err
+				}
+				ddlGeneratedTracker[opLog.Namespace] = true
+				allSqlStatements = append(allSqlStatements, schemaStatement, tableStatement)
+			}
+			insertStatement, err := parseInsertOpLog(opLog)
+			if err != nil {
+				return nil, err
+			}
+			allSqlStatements = append(allSqlStatements, insertStatement)
+		case Update:
+			statement, err := parseUpdateOpLog(opLog)
+			if err != nil {
+				return nil, err
+			}
+			allSqlStatements = append(allSqlStatements, statement)
+		case Delete:
+			statement, err := parseDeleteOpLog(opLog)
+			if err != nil {
+				return nil, err
+			}
+			allSqlStatements = append(allSqlStatements, statement)
+		default:
+			return nil, fmt.Errorf("oplog operation not supported: received operation %s", opLog.Operation)
 		}
-		return []string{statement}, nil
-	case Delete:
-		statement, err := parseDeleteOpLog(opLog)
-		if err != nil {
-			return nil, err
-		}
-		return []string{statement}, nil
-	default:
-		return nil, fmt.Errorf("oplog operation not supported: received operation %s", opLog.Operation)
 	}
+	return allSqlStatements, nil
 }
 
-func parseInsertOpLog(opLog OpLog) ([]string, error) {
+func parseInsertOpLog(opLog OpLog) (string, error) {
 	schema, table, err := parseNamespace(opLog.Namespace)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	if len(opLog.Data) == 0 {
-		return nil, fmt.Errorf("empty data field for insert")
+		return "", fmt.Errorf("empty data field for insert")
 	}
-	var statements []string
-	schemaStatement := fmt.Sprintf("CREATE SCHEMA %s", schema)
-	tableStatement, err := prepareTableStatement(schema, table, opLog)
-	if err != nil {
-		return nil, err
-	}
+
 	insertStatement, err := prepareInsertStatement(schema, table, opLog)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	statements = append(statements, schemaStatement, tableStatement, insertStatement)
-	return statements, nil
+	return insertStatement, nil
 }
 
 func parseUpdateOpLog(opLog OpLog) (string, error) {
@@ -141,7 +152,11 @@ func parseNamespace(namespace string) (schema, table string, err error) {
 	return parts[0], parts[1], nil
 }
 
-func prepareTableStatement(schema, table string, opLog OpLog) (string, error) {
+func prepareTableDDL(opLog OpLog) (schemaStatement, tableStatement string, err error) {
+	schema, table, err := parseNamespace(opLog.Namespace)
+	if err != nil {
+		return "", "", err
+	}
 	var columns []string
 	for colName := range opLog.Data {
 		columns = append(columns, colName)
@@ -153,11 +168,14 @@ func prepareTableStatement(schema, table string, opLog OpLog) (string, error) {
 		value := opLog.Data[colName]
 		sqlType, err := getSqlType(colName, value)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		tableFields = append(tableFields, fmt.Sprintf("%s %s", colName, sqlType))
 	}
-	return fmt.Sprintf("CREATE TABLE %s.%s (%s);", schema, table, strings.Join(tableFields, ", ")), nil
+	tableStatement = fmt.Sprintf("CREATE TABLE %s.%s (%s);", schema, table, strings.Join(tableFields, ", "))
+	schemaStatement = fmt.Sprintf("CREATE SCHEMA %s", schema)
+
+	return schemaStatement, tableStatement, nil
 }
 
 func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {

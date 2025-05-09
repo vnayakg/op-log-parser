@@ -11,6 +11,11 @@ const (
 	Insert = "i"
 	Update = "u"
 	Delete = "d"
+
+	fieldID    = "_id"
+	fieldDiff  = "diff"
+	fieldSet   = "u"
+	fieldUnset = "d"
 )
 
 type OpLog struct {
@@ -47,7 +52,6 @@ func parseInsertOpLog(opLog OpLog) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	if len(opLog.Data) == 0 {
 		return "", fmt.Errorf("empty data field for insert")
 	}
@@ -61,15 +65,18 @@ func parseInsertOpLog(opLog OpLog) (string, error) {
 }
 
 func parseUpdateOpLog(opLog OpLog) (string, error) {
-	diff := opLog.Data["diff"].(map[string]any)
+	diff := opLog.Data[fieldDiff].(map[string]any)
 	schema, table, err := parseNamespace(opLog.Namespace)
 	if err != nil {
 		return "", err
 	}
+	if opLog.O2 == nil || opLog.O2.ID == "" {
+		return "", fmt.Errorf("_id field is missing")
+	}
 	var setClauses []string
 
 	id := opLog.O2.ID
-	if u, ok := diff["u"]; ok {
+	if u, ok := diff[fieldSet]; ok {
 		setFields := u.(map[string]any)
 		var sets []string
 		for field, value := range setFields {
@@ -81,7 +88,7 @@ func parseUpdateOpLog(opLog OpLog) (string, error) {
 		}
 	}
 
-	if d, ok := diff["d"]; ok {
+	if d, ok := diff[fieldUnset]; ok {
 		unsetFields := d.(map[string]any)
 		var sets []string
 		for field := range unsetFields {
@@ -98,7 +105,7 @@ func parseUpdateOpLog(opLog OpLog) (string, error) {
 }
 
 func parseDeleteOpLog(opLog OpLog) (string, error) {
-	id, ok := opLog.Data["_id"]
+	id, ok := opLog.Data[fieldID]
 	if !ok {
 		return "", fmt.Errorf("_id field is missing")
 	}
@@ -129,7 +136,6 @@ func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
 		columns = append(columns, colName)
 	}
 	sort.Strings(columns)
-
 	for _, colName := range columns {
 		value := opLog.Data[colName]
 		values = append(values, formatValue(value))

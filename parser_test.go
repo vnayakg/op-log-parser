@@ -3,7 +3,6 @@ package parser
 import (
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 )
 
@@ -124,6 +123,17 @@ func TestParse(t *testing.T) {
 			expectedErr: nil,
 		},
 		{
+			name: "Update: o2 field with empty _id",
+			inputJSON: `{
+                "op": "u",
+                "ns": "test.student",
+                "o": {"diff": {"u": {"name": "test"}}},
+                "o2": {"_id": ""}
+            }`,
+			expectedSQL: "",
+			expectedErr: fmt.Errorf("_id field is missing"),
+		},
+		{
 			name: "Delete: Valid oplog entry",
 			inputJSON: `{
                 "op": "d",
@@ -150,7 +160,7 @@ func TestParse(t *testing.T) {
 			if tc.expectedErr != nil {
 				if err == nil {
 					t.Errorf("Expected error, but got nil. Expected error type/content: %v", tc.expectedErr)
-				} else if !errors.Is(err, tc.expectedErr) && !strings.Contains(err.Error(), tc.expectedErr.Error()) {
+				} else if !errors.Is(err, tc.expectedErr) && err.Error() != tc.expectedErr.Error() {
 					t.Errorf("Expected error type/content '%v', but got '%v'", tc.expectedErr, err)
 				}
 			} else {

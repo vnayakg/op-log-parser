@@ -135,3 +135,61 @@ func TestOplogToUpdateSQL(t *testing.T) {
 		})
 	}
 }
+
+func TestOplogToDeleteSQL(t *testing.T) {
+	testCases := []struct {
+		name        string
+		inputJSON   string
+		expectedSQL string
+		expectError bool
+		err         error
+	}{
+		{
+			name: "Valid delete log",
+			inputJSON: `{
+				"op": "d",
+  				"ns": "test.student",
+				"o": {
+					"_id": "635b79e231d82a8ab1de863b"
+				}
+			}`,
+			expectedSQL: "DELETE FROM test.student WHERE _id = '635b79e231d82a8ab1de863b';",
+			expectError: false,
+		},
+		{
+			name: "Invalid delete log, id field missing",
+			inputJSON: `{
+				"op": "d",
+				"ns": "test.student",
+				"o": {
+					"some": "other"
+				}
+			}`,
+			expectError: true,
+			err:         fmt.Errorf("_id field is missing"),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			actualSQL, err := parseDeleteOpLog(tc.inputJSON)
+
+			if tc.expectError {
+				if err == nil {
+					t.Errorf("Expected an error, but got nil")
+				} else if tc.err.Error() != err.Error() {
+					t.Errorf("Expected error message to contain '%s', but got '%s'", tc.err, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Did not expect an error, but got: %v", err)
+				}
+				if !reflect.DeepEqual(actualSQL, tc.expectedSQL) {
+					if actualSQL != tc.expectedSQL {
+						t.Errorf("Expected SQL:\n%s\nGot SQL:\n%s", tc.expectedSQL, actualSQL)
+					}
+				}
+			}
+		})
+	}
+}

@@ -78,6 +78,26 @@ func parseUpdateOpLog(opLogJson string) (string, error) {
 	return "", fmt.Errorf("unsupported update format")
 }
 
+func parseDeleteOpLog(opLogJson string) (string, error) {
+	var deleteLog OpLog
+	if err := json.Unmarshal([]byte(opLogJson), &deleteLog); err != nil {
+		return "", err
+	}
+	id, ok := deleteLog.Data["_id"]
+	if !ok {
+		return "", fmt.Errorf("_id field is missing")
+	}
+	schema, table, err := parseNamespace(deleteLog.Namespace)
+	if err != nil {
+		return "", err
+	}
+	return prepareDeleteStatement(schema, table, formatValue(id)), nil
+}
+
+func prepareDeleteStatement(schema, table, id string) string {
+	return fmt.Sprintf("DELETE FROM %s.%s WHERE _id = %s;", schema, table, id)
+}
+
 func parseNamespace(namespace string) (schema, table string, err error) {
 	parts := strings.Split(namespace, ".")
 	if len(parts) != 2 {

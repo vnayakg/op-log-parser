@@ -3,6 +3,7 @@ package parser
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 )
 
@@ -10,7 +11,7 @@ func TestParse(t *testing.T) {
 	testCases := []struct {
 		name        string
 		inputJSON   string
-		expectedSQL string
+		expectedSQL []string
 		expectedErr error
 	}{
 		{
@@ -28,12 +29,15 @@ func TestParse(t *testing.T) {
                     "age": 23.0
                 }
             }`,
-			expectedSQL: "INSERT INTO test.student (_id, age, date_of_birth, is_graduated, name, roll_no, score) VALUES ('635b79e231d82a8ab1de863b', 23, '2000-01-30', false, 'Selena O'Malley', 51, 95.500000);",
+			expectedSQL: []string{
+				"CREATE SCHEMA test",
+				"CREATE TABLE test.student (_id VARCHAR(255) PRIMARY KEY, age FLOAT, date_of_birth VARCHAR(255), is_graduated BOOLEAN, name VARCHAR(255), roll_no FLOAT, score FLOAT);",
+				"INSERT INTO test.student (_id, age, date_of_birth, is_graduated, name, roll_no, score) VALUES ('635b79e231d82a8ab1de863b', 23, '2000-01-30', false, 'Selena O'Malley', 51, 95.500000);"},
 			expectedErr: nil,
 		},
 		{
 			name:        "Insert: Invalid JSON",
-			expectedSQL: "",
+			expectedSQL: nil,
 			expectedErr: fmt.Errorf("Error unmarshaling oplog"),
 		},
 		{
@@ -43,7 +47,7 @@ func TestParse(t *testing.T) {
                 "ns": "teststudent",
                 "o": {"_id": "1"}
             }`,
-			expectedSQL: "",
+			expectedSQL: nil,
 			expectedErr: fmt.Errorf("error parsing namespace, invalid namespace"),
 		},
 		{
@@ -53,7 +57,7 @@ func TestParse(t *testing.T) {
                 "ns": ".student",
                 "o": {"_id": "1"}
             }`,
-			expectedSQL: "",
+			expectedSQL: nil,
 			expectedErr: fmt.Errorf("error parsing namespace, invalid namespace"),
 		},
 		{
@@ -63,7 +67,7 @@ func TestParse(t *testing.T) {
                 "ns": "test.student",
                 "o": {}
             }`,
-			expectedSQL: "",
+			expectedSQL: nil,
 			expectedErr: fmt.Errorf("empty data field for insert"),
 		},
 
@@ -77,7 +81,7 @@ func TestParse(t *testing.T) {
                 },
                 "o2": { "_id": "id123" }
             }`,
-			expectedSQL: "UPDATE test.student SET is_graduated = true WHERE _id = 'id123';",
+			expectedSQL: []string{"UPDATE test.student SET is_graduated = true WHERE _id = 'id123';"},
 			expectedErr: nil,
 		},
 		{
@@ -90,7 +94,7 @@ func TestParse(t *testing.T) {
                 },
                 "o2": { "_id": "id123" }
             }`,
-			expectedSQL: "UPDATE test.student SET age = 30, name = 'New Name' WHERE _id = 'id123';",
+			expectedSQL: []string{"UPDATE test.student SET age = 30, name = 'New Name' WHERE _id = 'id123';"},
 			expectedErr: nil,
 		},
 		{
@@ -103,7 +107,7 @@ func TestParse(t *testing.T) {
                 },
                 "o2": { "_id": "id123" }
             }`,
-			expectedSQL: "UPDATE test.student SET roll_no = NULL WHERE _id = 'id123';",
+			expectedSQL: []string{"UPDATE test.student SET roll_no = NULL WHERE _id = 'id123';"},
 			expectedErr: nil,
 		},
 		{
@@ -119,7 +123,7 @@ func TestParse(t *testing.T) {
                 },
                 "o2": { "_id": "idXYZ" }
             }`,
-			expectedSQL: "UPDATE test.student SET name = 'Updated Name', status = 'active', old_field = NULL, temp_data = NULL WHERE _id = 'idXYZ';",
+			expectedSQL: []string{"UPDATE test.student SET name = 'Updated Name', status = 'active', old_field = NULL, temp_data = NULL WHERE _id = 'idXYZ';"},
 			expectedErr: nil,
 		},
 		{
@@ -130,7 +134,7 @@ func TestParse(t *testing.T) {
                 "o": {"diff": {"u": {"name": "test"}}},
                 "o2": {"_id": ""}
             }`,
-			expectedSQL: "",
+			expectedSQL: nil,
 			expectedErr: fmt.Errorf("_id field is missing"),
 		},
 		{
@@ -140,7 +144,7 @@ func TestParse(t *testing.T) {
                 "ns": "test.student",
                 "o": { "_id": "someObjectIDString" }
             }`,
-			expectedSQL: "DELETE FROM test.student WHERE _id = 'someObjectIDString';",
+			expectedSQL: []string{"DELETE FROM test.student WHERE _id = 'someObjectIDString';"},
 			expectedErr: nil,
 		},
 		{
@@ -169,7 +173,7 @@ func TestParse(t *testing.T) {
 				}
 			}
 
-			if actualSQL != tc.expectedSQL {
+			if !reflect.DeepEqual(actualSQL, tc.expectedSQL) {
 				t.Errorf("SQL mismatch:\nExpected: %s\nActual  : %s", tc.expectedSQL, actualSQL)
 			}
 		})

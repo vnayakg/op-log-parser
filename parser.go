@@ -29,39 +29,52 @@ type O2Field struct {
 	ID string `json:"_id"`
 }
 
-func Parse(opLogJson string) (string, error) {
+func Parse(opLogJson string) ([]string, error) {
 	var opLog OpLog
 	if err := json.Unmarshal([]byte(opLogJson), &opLog); err != nil {
-		return "", fmt.Errorf("Error unmarshaling oplog")
+		return nil, fmt.Errorf("Error unmarshaling oplog")
 	}
 
 	switch opLog.Operation {
 	case Insert:
 		return parseInsertOpLog(opLog)
 	case Update:
-		return parseUpdateOpLog(opLog)
+		statement, err := parseUpdateOpLog(opLog)
+		if err != nil {
+			return nil, err
+		}
+		return []string{statement}, nil
 	case Delete:
-		return parseDeleteOpLog(opLog)
+		statement, err := parseDeleteOpLog(opLog)
+		if err != nil {
+			return nil, err
+		}
+		return []string{statement}, nil
 	default:
-		return "", fmt.Errorf("oplog operation not supported: received operation %s", opLog.Operation)
+		return nil, fmt.Errorf("oplog operation not supported: received operation %s", opLog.Operation)
 	}
 }
 
-func parseInsertOpLog(opLog OpLog) (string, error) {
+func parseInsertOpLog(opLog OpLog) ([]string, error) {
 	schema, table, err := parseNamespace(opLog.Namespace)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(opLog.Data) == 0 {
-		return "", fmt.Errorf("empty data field for insert")
+		return nil, fmt.Errorf("empty data field for insert")
 	}
-
-	statement, err := prepareInsertStatement(schema, table, opLog)
+	var statements []string
+	schemaStatement := fmt.Sprintf("CREATE SCHEMA %s", schema)
+	tableStatement, err := prepareTableStatement(schema, table, opLog)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	return statement, nil
+	insertStatement, err := prepareInsertStatement(schema, table, opLog)
+	if err != nil {
+		return nil, err
+	}
+	statements = append(statements, schemaStatement, tableStatement, insertStatement)
+	return statements, nil
 }
 
 func parseUpdateOpLog(opLog OpLog) (string, error) {
@@ -128,6 +141,25 @@ func parseNamespace(namespace string) (schema, table string, err error) {
 	return parts[0], parts[1], nil
 }
 
+func prepareTableStatement(schema, table string, opLog OpLog) (string, error) {
+	var columns []string
+	for colName := range opLog.Data {
+		columns = append(columns, colName)
+	}
+	sort.Strings(columns)
+
+	var tableFields []string
+	for _, colName := range columns {
+		value := opLog.Data[colName]
+		sqlType, err := getSqlType(colName, value)
+		if err != nil {
+			return "", err
+		}
+		tableFields = append(tableFields, fmt.Sprintf("%s %s", colName, sqlType))
+	}
+	return fmt.Sprintf("CREATE TABLE %s.%s (%s);", schema, table, strings.Join(tableFields, ", ")), nil
+}
+
 func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
 	columns := []string{}
 	values := []string{}
@@ -149,6 +181,23 @@ func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
 		strings.Join(values, ", "),
 	)
 	return sqlStatement, nil
+}
+
+func getSqlType(fieldName string, value any) (string, error) {
+	if fieldName == fieldID {
+		return "VARCHAR(255) PRIMARY KEY", nil
+	}
+
+	switch value.(type) {
+	case string:
+		return "VARCHAR(255)", nil
+	case bool:
+		return "BOOLEAN", nil
+	case float64, int64:
+		return "FLOAT", nil
+	default:
+		return "", fmt.Errorf("error converting: %v to sql type", value)
+	}
 }
 
 func formatValue(v any) string {

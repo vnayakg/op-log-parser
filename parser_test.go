@@ -43,7 +43,7 @@ func TestParse(t *testing.T) {
                 }
             }]`,
 			expectedSQL: []string{
-				"CREATE SCHEMA test",
+				"CREATE SCHEMA test;",
 				"CREATE TABLE test.student (_id VARCHAR(255) PRIMARY KEY, age FLOAT, date_of_birth VARCHAR(255), is_graduated BOOLEAN, name VARCHAR(255), roll_no FLOAT, score FLOAT);",
 				"INSERT INTO test.student (_id, age, date_of_birth, is_graduated, name, roll_no, score) VALUES ('635b79e231d82a8ab1de863b', 23, '2000-01-30', false, 'Selena O'Malley', 51, 95.500000);",
 				"INSERT INTO test.student (_id, age, date_of_birth, is_graduated, name, roll_no, score) VALUES ('123b79e231d82a8ab1de863b', 24, '2001-01-30', false, 'Ramesh Ramesh', 52, 80);"},
@@ -96,7 +96,7 @@ func TestParse(t *testing.T) {
             }
 			]`,
 			expectedSQL: []string{
-				"CREATE SCHEMA test",
+				"CREATE SCHEMA test;",
 				"CREATE TABLE test.student (_id VARCHAR(255) PRIMARY KEY, age FLOAT, date_of_birth VARCHAR(255), is_graduated BOOLEAN, name VARCHAR(255), roll_no FLOAT, score FLOAT);",
 				"INSERT INTO test.student (_id, age, date_of_birth, is_graduated, name, roll_no, score) VALUES ('635b79e231d82a8ab1de863b', 23, '2000-01-30', false, 'Selena O'Malley', 51, 95.500000);",
 				"ALTER TABLE test.student ADD gender VARCHAR(255);",
@@ -225,13 +225,14 @@ func TestParse(t *testing.T) {
                 "ns": "test.student",
                 "o": {"_id": "1"}
             }]`,
-			expectedErr: fmt.Errorf("oplog operation not supported: received operation n"),
+			expectedErr: fmt.Errorf("unsupported oplog operation: n"),
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			actualSQL, err := Parse(tc.inputJSON)
+			parser := CreateParser()
+			actualSQL, err := parser.Parse(tc.inputJSON)
 			if tc.expectedErr != nil {
 				if err == nil {
 					t.Errorf("Expected error, but got nil. Expected error type/content: %v", tc.expectedErr)

@@ -29,129 +29,115 @@ type O2Field struct {
 	ID string `json:"_id"`
 }
 
-func Parse(opLogJson string) ([]string, error) {
+type Parser interface {
+	Parse(oplogJson string) ([]string, error)
+}
+
+type opLogParser struct {
+	ddlTracker     map[string]bool
+	columnsTracker map[string]map[string]bool
+}
+
+func CreateParser() Parser {
+	return &opLogParser{
+		ddlTracker:     make(map[string]bool),
+		columnsTracker: make(map[string]map[string]bool),
+	}
+}
+
+func (op *opLogParser) Parse(opLogJson string) ([]string, error) {
 	var opLogs []OpLog
 	if err := json.Unmarshal([]byte(opLogJson), &opLogs); err != nil {
 		return nil, fmt.Errorf("Error unmarshaling oplog")
 	}
-	var allSqlStatements []string
-	ddlGeneratedTracker := make(map[string]bool)
-	tableToColsTracker := make(map[string]map[string]any)
 
+	var statements []string
 	for _, opLog := range opLogs {
 
-		switch opLog.Operation {
-		case Insert:
-			if !ddlGeneratedTracker[opLog.Namespace] {
-				schemaStatement, tableStatement, err := prepareTableDDL(opLog)
-				if err != nil {
-					return nil, err
-				}
-				ddlGeneratedTracker[opLog.Namespace] = true
-				allSqlStatements = append(allSqlStatements, schemaStatement, tableStatement)
-
-				columns := getColumnsForInsert(opLog)
-
-				tableToColsTracker[opLog.Namespace] = make(map[string]any)
-				for _, col := range columns {
-					tableToColsTracker[opLog.Namespace][col] = true
-				}
-			} else {
-				newColumns := make(map[string]any)
-
-				for col, value := range opLog.Data {
-					if _, ok := tableToColsTracker[opLog.Namespace][col]; !ok {
-						newColumns[col] = value
-					}
-				}
-
-				if len(newColumns) > 0 {
-					alterStatement, err := prepareAlterStatement(opLog, newColumns)
-					if err != nil {
-						return nil, err
-					}
-					allSqlStatements = append(allSqlStatements, alterStatement)
-
-					for cols := range newColumns {
-						tableToColsTracker[opLog.Namespace][cols] = true
-					}
-
-				}
-			}
-
-			insertStatement, err := parseInsertOpLog(opLog)
-			if err != nil {
-				return nil, err
-			}
-			allSqlStatements = append(allSqlStatements, insertStatement)
-		case Update:
-			statement, err := parseUpdateOpLog(opLog)
-			if err != nil {
-				return nil, err
-			}
-			allSqlStatements = append(allSqlStatements, statement)
-		case Delete:
-			statement, err := parseDeleteOpLog(opLog)
-			if err != nil {
-				return nil, err
-			}
-			allSqlStatements = append(allSqlStatements, statement)
-		default:
-			return nil, fmt.Errorf("oplog operation not supported: received operation %s", opLog.Operation)
-		}
-	}
-	return allSqlStatements, nil
-}
-
-func prepareAlterStatement(opLog OpLog, newColumns map[string]any) (string, error) {
-	schema, table, err := parseNamespace(opLog.Namespace)
-	if err != nil {
-		return "", err
-	}
-
-	var columnDefinitions []string
-	for col, value := range newColumns {
-		sqlType, err := getSqlType(col, value)
+		processedStatements, err := op.processOpLog(opLog)
 		if err != nil {
-			return "", err
+			return nil, err
+		}
+		statements = append(statements, processedStatements...)
+	}
+
+	return statements, nil
+}
+
+func (op *opLogParser) processOpLog(opLog OpLog) ([]string, error) {
+	switch opLog.Operation {
+	case Insert:
+		return op.handleInsert(opLog)
+	case Update:
+		return op.handleUpdate(opLog)
+	case Delete:
+		return op.handleDelete(opLog)
+	default:
+		return nil, fmt.Errorf("unsupported oplog operation: %s", opLog.Operation)
+	}
+}
+
+func (op *opLogParser) handleInsert(opLog OpLog) ([]string, error) {
+	schema, table, err := parseNamespace(opLog.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	var statements []string
+
+	if !op.isDDLGenerated(opLog.Namespace) {
+		schemaStatement, tableStatement, err := prepareTableDDL(opLog)
+		if err != nil {
+			return nil, err
+		}
+		statements = append(statements, schemaStatement, tableStatement)
+
+		op.markDDLGenerated(opLog.Namespace)
+		op.initializeColumnTracker(opLog.Namespace, opLog.Data)
+	} else {
+		newFields := make(map[string]any)
+		knownColumns := op.getKnownColumns(opLog.Namespace)
+		for col, value := range opLog.Data {
+			if !knownColumns[col] {
+				newFields[col] = value
+			}
 		}
 
-		columnDefinitions = append(columnDefinitions, fmt.Sprintf("%s %s", col, sqlType))
+		if len(newFields) > 0 {
+			alterStatement, err := prepareAlterStatement(schema, table, opLog, newFields)
+			if err != nil {
+				return nil, err
+			}
+			statements = append(statements, alterStatement)
+			op.updateColumnsTracker(opLog.Namespace, newFields)
+		}
 	}
-
-	return fmt.Sprintf("ALTER TABLE %s.%s ADD %s;", schema, table, strings.Join(columnDefinitions, ", ")), nil
+	knownColumns := op.getKnownColumns(opLog.Namespace)
+	insertStatement, err := parseInsertOpLog(schema, table, opLog, knownColumns)
+	if err != nil {
+		return nil, err
+	}
+	statements = append(statements, insertStatement)
+	return statements, nil
 }
 
-func parseInsertOpLog(opLog OpLog) (string, error) {
-	schema, table, err := parseNamespace(opLog.Namespace)
-	if err != nil {
-		return "", err
-	}
-	if len(opLog.Data) == 0 {
-		return "", fmt.Errorf("empty data field for insert")
-	}
-
-	insertStatement, err := prepareInsertStatement(schema, table, opLog)
-	if err != nil {
-		return "", err
-	}
-	return insertStatement, nil
-}
-
-func parseUpdateOpLog(opLog OpLog) (string, error) {
-	diff := opLog.Data[fieldDiff].(map[string]any)
-	schema, table, err := parseNamespace(opLog.Namespace)
-	if err != nil {
-		return "", err
-	}
+func (op *opLogParser) handleUpdate(opLog OpLog) ([]string, error) {
 	if opLog.O2 == nil || opLog.O2.ID == "" {
-		return "", fmt.Errorf("_id field is missing")
+		return nil, fmt.Errorf("_id field is missing")
 	}
-	var setClauses []string
 
-	id := opLog.O2.ID
-	if u, ok := diff[fieldSet]; ok {
-		setFields := u.(map[string]any)
+	diff, ok := opLog.Data[fieldDiff].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("invalid diff field in update oplog")
+	}
+
+	schema, table, err := parseNamespace(opLog.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	var setClauses []string
+	if setFields, ok := diff[fieldSet].(map[string]any); ok {
 		var sets []string
 		for field, value := range setFields {
 			sets = append(sets, fmt.Sprintf("%s = %s", field, formatValue(value)))
@@ -162,8 +148,7 @@ func parseUpdateOpLog(opLog OpLog) (string, error) {
 		}
 	}
 
-	if d, ok := diff[fieldUnset]; ok {
-		unsetFields := d.(map[string]any)
+	if unsetFields, ok := diff[fieldUnset].(map[string]any); ok {
 		var sets []string
 		for field := range unsetFields {
 			sets = append(sets, fmt.Sprintf("%s = NULL", field))
@@ -174,24 +159,100 @@ func parseUpdateOpLog(opLog OpLog) (string, error) {
 		}
 
 	}
-	return fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
-		schema, table, strings.Join(setClauses, ", "), id), nil
+	return []string{fmt.Sprintf("UPDATE %s.%s SET %s WHERE _id = '%s';",
+		schema, table, strings.Join(setClauses, ", "), opLog.O2.ID)}, nil
 }
 
-func parseDeleteOpLog(opLog OpLog) (string, error) {
+func (op *opLogParser) handleDelete(opLog OpLog) ([]string, error) {
 	id, ok := opLog.Data[fieldID]
 	if !ok {
-		return "", fmt.Errorf("_id field is missing")
+		return nil, fmt.Errorf("_id field is missing")
 	}
 	schema, table, err := parseNamespace(opLog.Namespace)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	return prepareDeleteStatement(schema, table, formatValue(id)), nil
+	return []string{fmt.Sprintf("DELETE FROM %s.%s WHERE _id = %s;", schema, table, formatValue(id))}, nil
 }
 
-func prepareDeleteStatement(schema, table, id string) string {
-	return fmt.Sprintf("DELETE FROM %s.%s WHERE _id = %s;", schema, table, id)
+func (op *opLogParser) getKnownColumns(namespace string) map[string]bool {
+	if columns, exists := op.columnsTracker[namespace]; exists {
+		return columns
+	}
+	return make(map[string]bool)
+}
+
+func (op *opLogParser) isDDLGenerated(namespace string) bool {
+	return op.ddlTracker[namespace]
+}
+
+func (op *opLogParser) markDDLGenerated(namespace string) {
+	op.ddlTracker[namespace] = true
+}
+
+func (op *opLogParser) initializeColumnTracker(namespace string, data map[string]any) {
+	op.columnsTracker[namespace] = make(map[string]bool)
+	for col, _ := range data {
+		op.columnsTracker[namespace][col] = true
+	}
+}
+
+func (op *opLogParser) updateColumnsTracker(namespace string, newFields map[string]any) {
+	if columns, exists := op.columnsTracker[namespace]; exists {
+		for field := range newFields {
+			columns[field] = true
+		}
+	}
+}
+
+func prepareAlterStatement(schema, table string, opLog OpLog, newFields map[string]any) (string, error) {
+	var fields []string
+	for field := range newFields {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+
+	var columnDefinitions []string
+	for _, col := range fields {
+		sqlType, err := getSqlType(col, newFields[col])
+		if err != nil {
+			return "", err
+		}
+
+		columnDefinitions = append(columnDefinitions, fmt.Sprintf("%s %s", col, sqlType))
+	}
+
+	return fmt.Sprintf("ALTER TABLE %s.%s ADD %s;", schema, table, strings.Join(columnDefinitions, ", ")), nil
+}
+
+func parseInsertOpLog(schema, table string, opLog OpLog, knownColumns map[string]bool) (string, error) {
+	if len(opLog.Data) == 0 {
+		return "", fmt.Errorf("empty data field for insert")
+	}
+	values := []string{}
+	var columns []string
+	for col := range knownColumns {
+		columns = append(columns, col)
+	}
+	sort.Strings(columns)
+
+	for _, col := range columns {
+		value, ok := opLog.Data[col]
+		if !ok {
+			values = append(values, "NULL")
+		} else {
+			values = append(values, formatValue(value))
+		}
+	}
+
+	statement := fmt.Sprintf(
+		"INSERT INTO %s.%s (%s) VALUES (%s);",
+		schema,
+		table,
+		strings.Join(columns, ", "),
+		strings.Join(values, ", "),
+	)
+	return statement, nil
 }
 
 func parseNamespace(namespace string) (schema, table string, err error) {
@@ -223,38 +284,9 @@ func prepareTableDDL(opLog OpLog) (schemaStatement, tableStatement string, err e
 		tableFields = append(tableFields, fmt.Sprintf("%s %s", colName, sqlType))
 	}
 	tableStatement = fmt.Sprintf("CREATE TABLE %s.%s (%s);", schema, table, strings.Join(tableFields, ", "))
-	schemaStatement = fmt.Sprintf("CREATE SCHEMA %s", schema)
+	schemaStatement = fmt.Sprintf("CREATE SCHEMA %s;", schema)
 
 	return schemaStatement, tableStatement, nil
-}
-
-func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
-	values := []string{}
-	columns := getColumnsForInsert(opLog)
-
-	for _, colName := range columns {
-		value := opLog.Data[colName]
-		values = append(values, formatValue(value))
-	}
-
-	sqlStatement := fmt.Sprintf(
-		"INSERT INTO %s.%s (%s) VALUES (%s);",
-		schema,
-		table,
-		strings.Join(columns, ", "),
-		strings.Join(values, ", "),
-	)
-	return sqlStatement, nil
-}
-
-func getColumnsForInsert(opLog OpLog) []string {
-	columns := []string{}
-	for colName := range opLog.Data {
-		columns = append(columns, colName)
-	}
-	sort.Strings(columns)
-
-	return columns
 }
 
 func getSqlType(fieldName string, value any) (string, error) {

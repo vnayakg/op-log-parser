@@ -36,6 +36,8 @@ func Parse(opLogJson string) ([]string, error) {
 	}
 	var allSqlStatements []string
 	ddlGeneratedTracker := make(map[string]bool)
+	tableToColsTracker := make(map[string]map[string]any)
+
 	for _, opLog := range opLogs {
 
 		switch opLog.Operation {
@@ -47,7 +49,36 @@ func Parse(opLogJson string) ([]string, error) {
 				}
 				ddlGeneratedTracker[opLog.Namespace] = true
 				allSqlStatements = append(allSqlStatements, schemaStatement, tableStatement)
+
+				columns := getColumnsForInsert(opLog)
+
+				tableToColsTracker[opLog.Namespace] = make(map[string]any)
+				for _, col := range columns {
+					tableToColsTracker[opLog.Namespace][col] = true
+				}
+			} else {
+				newColumns := make(map[string]any)
+
+				for col, value := range opLog.Data {
+					if _, ok := tableToColsTracker[opLog.Namespace][col]; !ok {
+						newColumns[col] = value
+					}
+				}
+
+				if len(newColumns) > 0 {
+					alterStatement, err := prepareAlterStatement(opLog, newColumns)
+					if err != nil {
+						return nil, err
+					}
+					allSqlStatements = append(allSqlStatements, alterStatement)
+
+					for cols := range newColumns {
+						tableToColsTracker[opLog.Namespace][cols] = true
+					}
+
+				}
 			}
+
 			insertStatement, err := parseInsertOpLog(opLog)
 			if err != nil {
 				return nil, err
@@ -70,6 +101,25 @@ func Parse(opLogJson string) ([]string, error) {
 		}
 	}
 	return allSqlStatements, nil
+}
+
+func prepareAlterStatement(opLog OpLog, newColumns map[string]any) (string, error) {
+	schema, table, err := parseNamespace(opLog.Namespace)
+	if err != nil {
+		return "", err
+	}
+
+	var columnDefinitions []string
+	for col, value := range newColumns {
+		sqlType, err := getSqlType(col, value)
+		if err != nil {
+			return "", err
+		}
+
+		columnDefinitions = append(columnDefinitions, fmt.Sprintf("%s %s", col, sqlType))
+	}
+
+	return fmt.Sprintf("ALTER TABLE %s.%s ADD %s;", schema, table, strings.Join(columnDefinitions, ", ")), nil
 }
 
 func parseInsertOpLog(opLog OpLog) (string, error) {
@@ -179,13 +229,9 @@ func prepareTableDDL(opLog OpLog) (schemaStatement, tableStatement string, err e
 }
 
 func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
-	columns := []string{}
 	values := []string{}
+	columns := getColumnsForInsert(opLog)
 
-	for colName := range opLog.Data {
-		columns = append(columns, colName)
-	}
-	sort.Strings(columns)
 	for _, colName := range columns {
 		value := opLog.Data[colName]
 		values = append(values, formatValue(value))
@@ -199,6 +245,16 @@ func prepareInsertStatement(schema, table string, opLog OpLog) (string, error) {
 		strings.Join(values, ", "),
 	)
 	return sqlStatement, nil
+}
+
+func getColumnsForInsert(opLog OpLog) []string {
+	columns := []string{}
+	for colName := range opLog.Data {
+		columns = append(columns, colName)
+	}
+	sort.Strings(columns)
+
+	return columns
 }
 
 func getSqlType(fieldName string, value any) (string, error) {

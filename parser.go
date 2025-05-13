@@ -16,6 +16,7 @@ const (
 	fieldDiff  = "diff"
 	fieldSet   = "u"
 	fieldUnset = "d"
+	fieldNull  = "NULL"
 )
 
 type OpLog struct {
@@ -36,12 +37,16 @@ type Parser interface {
 type opLogParser struct {
 	ddlTracker     map[string]bool
 	columnsTracker map[string]map[string]bool
+	uuidGenerator  UUIDGenerator
 }
 
-func CreateParser() Parser {
+type UUIDGenerator func() string
+
+func CreateParser(uuidGenerator UUIDGenerator) Parser {
 	return &opLogParser{
 		ddlTracker:     make(map[string]bool),
 		columnsTracker: make(map[string]map[string]bool),
+		uuidGenerator:  uuidGenerator,
 	}
 }
 
@@ -50,17 +55,15 @@ func (op *opLogParser) Parse(opLogJson string) ([]string, error) {
 	if err := json.Unmarshal([]byte(opLogJson), &opLogs); err != nil {
 		return nil, fmt.Errorf("Error unmarshaling oplog")
 	}
-
 	var statements []string
-	for _, opLog := range opLogs {
 
+	for _, opLog := range opLogs {
 		processedStatements, err := op.processOpLog(opLog)
 		if err != nil {
 			return nil, err
 		}
 		statements = append(statements, processedStatements...)
 	}
-
 	return statements, nil
 }
 
@@ -84,16 +87,36 @@ func (op *opLogParser) handleInsert(opLog OpLog) ([]string, error) {
 	}
 
 	var statements []string
+	mainData, nestedData, arrayData := splitData(opLog.Data)
 
 	if !op.isDDLGenerated(opLog.Namespace) {
-		schemaStatement, tableStatement, err := prepareTableDDL(opLog)
+		schemaStatement := fmt.Sprintf("CREATE SCHEMA %s;", schema)
+		tableStatement, err := prepareTableDDL(schema, table, mainData)
 		if err != nil {
 			return nil, err
 		}
 		statements = append(statements, schemaStatement, tableStatement)
 
+		for field, nestedObj := range nestedData {
+			nestedTable := fmt.Sprintf("%s_%s", table, field)
+			nestedStatements, err := op.generateTableDDLAndInsertForNestedObject(schema, nestedTable, opLog.Data[fieldID].(string), table, nestedObj)
+			if err != nil {
+				return nil, err
+			}
+			statements = append(statements, nestedStatements...)
+		}
+
+		for field, nestedArray := range arrayData {
+			nestedTable := fmt.Sprintf("%s_%s", table, field)
+			nestedStatements, err := op.generateTableDDLAndInsertForArray(schema, nestedTable, opLog.Data[fieldID].(string), table, nestedArray)
+			if err != nil {
+				return nil, err
+			}
+			statements = append(statements, nestedStatements...)
+		}
+
 		op.markDDLGenerated(opLog.Namespace)
-		op.initializeColumnTracker(opLog.Namespace, opLog.Data)
+		op.initializeColumnTracker(opLog.Namespace, mainData)
 	} else {
 		newFields := make(map[string]any)
 		knownColumns := op.getKnownColumns(opLog.Namespace)
@@ -104,16 +127,32 @@ func (op *opLogParser) handleInsert(opLog OpLog) ([]string, error) {
 		}
 
 		if len(newFields) > 0 {
-			alterStatement, err := prepareAlterStatement(schema, table, opLog, newFields)
+			alterStatement, err := prepareAlterStatement(schema, table, newFields)
 			if err != nil {
 				return nil, err
 			}
 			statements = append(statements, alterStatement)
 			op.updateColumnsTracker(opLog.Namespace, newFields)
 		}
+		for field, nestedObj := range nestedData {
+			nestedTable := fmt.Sprintf("%s_%s", table, field)
+			nestedStatements, err := op.generateTableDDLAndInsertForNestedObject(schema, nestedTable, opLog.Data[fieldID].(string), table, nestedObj)
+			if err != nil {
+				return nil, err
+			}
+			statements = append(statements, nestedStatements...)
+		}
+		for field, nestedArray := range arrayData {
+			nestedTable := fmt.Sprintf("%s_%s", table, field)
+			nestedStatements, err := op.generateTableDDLAndInsertForArray(schema, nestedTable, opLog.Data[fieldID].(string), table, nestedArray)
+			if err != nil {
+				return nil, err
+			}
+			statements = append(statements, nestedStatements...)
+		}
 	}
 	knownColumns := op.getKnownColumns(opLog.Namespace)
-	insertStatement, err := parseInsertOpLog(schema, table, opLog, knownColumns)
+	insertStatement, err := prepareInsertStatement(schema, table, opLog.Data, knownColumns)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +190,7 @@ func (op *opLogParser) handleUpdate(opLog OpLog) ([]string, error) {
 	if unsetFields, ok := diff[fieldUnset].(map[string]any); ok {
 		var sets []string
 		for field := range unsetFields {
-			sets = append(sets, fmt.Sprintf("%s = NULL", field))
+			sets = append(sets, fmt.Sprintf("%s = %s", field, fieldNull))
 		}
 		if len(sets) > 0 {
 			sort.Strings(sets)
@@ -205,7 +244,76 @@ func (op *opLogParser) updateColumnsTracker(namespace string, newFields map[stri
 	}
 }
 
-func prepareAlterStatement(schema, table string, opLog OpLog, newFields map[string]any) (string, error) {
+func splitData(data map[string]any) (main, nested map[string]any, arrays map[string][]any) {
+	main = make(map[string]any)
+	nested = make(map[string]any)
+	arrays = make(map[string][]any)
+
+	for key, value := range data {
+		switch val := value.(type) {
+		case map[string]any:
+			nested[key] = val
+		case []any:
+			if len(val) > 0 {
+				if _, ok := val[0].(map[string]any); ok {
+					arrays[key] = val
+				} else {
+					main[key] = val
+				}
+			}
+		default:
+			main[key] = val
+		}
+	}
+	return main, nested, arrays
+}
+
+func (op *opLogParser) generateTableDDLAndInsertForArray(schema, table, parentID, parentTable string, arrayData []any) ([]string, error) {
+	var statements []string
+	for _, item := range arrayData {
+		statement, err := op.generateTableDDLAndInsertForNestedObject(schema, table, parentID, parentTable, item)
+		if err != nil {
+			return nil, err
+		}
+		statements = append(statements, statement...)
+	}
+	return statements, nil
+}
+
+func (op *opLogParser) generateTableDDLAndInsertForNestedObject(schema, table, parentID, parentTable string, data any) ([]string, error) {
+	var statements []string
+
+	nestedData, ok := data.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("expected map[string]any for %s, got %T", table, data)
+	}
+
+	nestedData[fieldID] = op.uuidGenerator()
+	nestedData[fmt.Sprintf("%s_%s", parentTable, fieldID)] = parentID
+	tableSchemaName := fmt.Sprintf("%s.%s", schema, table)
+
+	if !op.isDDLGenerated(tableSchemaName) {
+		tableStatement, err := prepareNestedTableDDL(schema, table, nestedData, parentTable, parentID)
+		if err != nil {
+			return nil, err
+		}
+
+		op.markDDLGenerated(tableSchemaName)
+		op.initializeColumnTracker(tableSchemaName, nestedData)
+		statements = append(statements, tableStatement)
+	}
+
+	knownColumns := op.getKnownColumns(tableSchemaName)
+	insertStmt, err := prepareInsertStatement(schema, table, nestedData, knownColumns)
+	if err != nil {
+		return nil, err
+	}
+	statements = append(statements, insertStmt)
+
+	return statements, nil
+}
+
+func prepareAlterStatement(schema, table string, newFields map[string]any) (string, error) {
 	var fields []string
 	for field := range newFields {
 		fields = append(fields, field)
@@ -225,8 +333,8 @@ func prepareAlterStatement(schema, table string, opLog OpLog, newFields map[stri
 	return fmt.Sprintf("ALTER TABLE %s.%s ADD %s;", schema, table, strings.Join(columnDefinitions, ", ")), nil
 }
 
-func parseInsertOpLog(schema, table string, opLog OpLog, knownColumns map[string]bool) (string, error) {
-	if len(opLog.Data) == 0 {
+func prepareInsertStatement(schema, table string, data map[string]any, knownColumns map[string]bool) (string, error) {
+	if len(data) == 0 {
 		return "", fmt.Errorf("empty data field for insert")
 	}
 	values := []string{}
@@ -237,9 +345,9 @@ func parseInsertOpLog(schema, table string, opLog OpLog, knownColumns map[string
 	sort.Strings(columns)
 
 	for _, col := range columns {
-		value, ok := opLog.Data[col]
+		value, ok := data[col]
 		if !ok {
-			values = append(values, "NULL")
+			values = append(values, fieldNull)
 		} else {
 			values = append(values, formatValue(value))
 		}
@@ -263,30 +371,51 @@ func parseNamespace(namespace string) (schema, table string, err error) {
 	return parts[0], parts[1], nil
 }
 
-func prepareTableDDL(opLog OpLog) (schemaStatement, tableStatement string, err error) {
-	schema, table, err := parseNamespace(opLog.Namespace)
-	if err != nil {
-		return "", "", err
-	}
+func prepareNestedTableDDL(schema, table string, data map[string]any, parentTable, referenceTableId string) (tableStatement string, err error) {
 	var columns []string
-	for colName := range opLog.Data {
+	for colName := range data {
 		columns = append(columns, colName)
 	}
 	sort.Strings(columns)
 
 	var tableFields []string
 	for _, colName := range columns {
-		value := opLog.Data[colName]
+		var value any
+		if colName == fmt.Sprintf("%s__id", parentTable) {
+			value = referenceTableId
+		} else {
+			value = data[colName]
+		}
 		sqlType, err := getSqlType(colName, value)
 		if err != nil {
-			return "", "", err
+			return "", err
 		}
 		tableFields = append(tableFields, fmt.Sprintf("%s %s", colName, sqlType))
 	}
 	tableStatement = fmt.Sprintf("CREATE TABLE %s.%s (%s);", schema, table, strings.Join(tableFields, ", "))
-	schemaStatement = fmt.Sprintf("CREATE SCHEMA %s;", schema)
 
-	return schemaStatement, tableStatement, nil
+	return tableStatement, nil
+}
+
+func prepareTableDDL(schema, table string, data map[string]any) (tableStatement string, err error) {
+	var columns []string
+	for colName := range data {
+		columns = append(columns, colName)
+	}
+	sort.Strings(columns)
+
+	var tableFields []string
+	for _, colName := range columns {
+		value := data[colName]
+		sqlType, err := getSqlType(colName, value)
+		if err != nil {
+			return "", err
+		}
+		tableFields = append(tableFields, fmt.Sprintf("%s %s", colName, sqlType))
+	}
+	tableStatement = fmt.Sprintf("CREATE TABLE %s.%s (%s);", schema, table, strings.Join(tableFields, ", "))
+
+	return tableStatement, nil
 }
 
 func getSqlType(fieldName string, value any) (string, error) {
@@ -302,7 +431,7 @@ func getSqlType(fieldName string, value any) (string, error) {
 	case float64, int64:
 		return "FLOAT", nil
 	default:
-		return "", fmt.Errorf("error converting: %v to sql type", value)
+		return "", fmt.Errorf("error converting: %v to sql type for field %v", value, fieldName)
 	}
 }
 

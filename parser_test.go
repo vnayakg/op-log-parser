@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+const uuid = "random-uuid"
+
 func TestParse(t *testing.T) {
 	testCases := []struct {
 		name        string
@@ -103,6 +105,45 @@ func TestParse(t *testing.T) {
 				"INSERT INTO test.student (_id, age, date_of_birth, gender, is_graduated, name, roll_no, score) VALUES ('123b79e231d82a8ab1de863b', 24, '2001-01-30', 'Male', false, 'Ramesh Ramesh', 52, 80);",
 				"ALTER TABLE test.student ADD height FLOAT, weight FLOAT;",
 				"INSERT INTO test.student (_id, age, date_of_birth, gender, height, is_graduated, name, roll_no, score, weight) VALUES ('098b79e231d82a8ab1de863b', 110, '1920-01-30', 'Male', 6.100000, true, 'Superman', 1, 100, 90);",
+			},
+			expectedErr: nil,
+		},
+		{
+			name: "Insert: Valid nested data",
+			inputJSON: `[{
+				"op": "i",
+				"ns": "test.student",
+				"o": {
+					"_id": "635b79e231d82a8ab1de863b",
+					"name": "Selena Miller",
+					"roll_no": 100,
+					"is_graduated": false,
+					"date_of_birth": "2000-01-30",
+					"address": [
+					{
+						"line1": "481 Harborsburgh",
+						"zip": "89799"
+					},
+					{
+						"line1": "329 Flatside",
+						"zip": "80872"
+					}
+					],
+					"phone": {
+						"personal": "7678456640",
+						"work": "8130097989"
+					}
+				}
+				}]`,
+			expectedSQL: []string{
+				"CREATE SCHEMA test;",
+				"CREATE TABLE test.student (_id VARCHAR(255) PRIMARY KEY, date_of_birth VARCHAR(255), is_graduated BOOLEAN, name VARCHAR(255), roll_no FLOAT);",
+				"CREATE TABLE test.student_phone (_id VARCHAR(255) PRIMARY KEY, personal VARCHAR(255), student__id VARCHAR(255), work VARCHAR(255));",
+				"INSERT INTO test.student_phone (_id, personal, student__id, work) VALUES ('random-uuid', '7678456640', '635b79e231d82a8ab1de863b', '8130097989');",
+				"CREATE TABLE test.student_address (_id VARCHAR(255) PRIMARY KEY, line1 VARCHAR(255), student__id VARCHAR(255), zip VARCHAR(255));",
+				"INSERT INTO test.student_address (_id, line1, student__id, zip) VALUES ('random-uuid', '481 Harborsburgh', '635b79e231d82a8ab1de863b', '89799');",
+				"INSERT INTO test.student_address (_id, line1, student__id, zip) VALUES ('random-uuid', '329 Flatside', '635b79e231d82a8ab1de863b', '80872');",
+				"INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 100);",
 			},
 			expectedErr: nil,
 		},
@@ -231,8 +272,12 @@ func TestParse(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			parser := CreateParser()
+			uuidGenerator := func() string {
+				return uuid
+			}
+			parser := CreateParser(uuidGenerator)
 			actualSQL, err := parser.Parse(tc.inputJSON)
+
 			if tc.expectedErr != nil {
 				if err == nil {
 					t.Errorf("Expected error, but got nil. Expected error type/content: %v", tc.expectedErr)

@@ -32,6 +32,7 @@ type O2Field struct {
 
 type Parser interface {
 	Parse(oplogJson string) ([]string, error)
+	ProcessOpLog(opLog OpLog) ([]string, error)
 }
 
 type opLogParser struct {
@@ -58,7 +59,7 @@ func (op *opLogParser) Parse(opLogJson string) ([]string, error) {
 	var statements []string
 
 	for _, opLog := range opLogs {
-		processedStatements, err := op.processOpLog(opLog)
+		processedStatements, err := op.ProcessOpLog(opLog)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +68,7 @@ func (op *opLogParser) Parse(opLogJson string) ([]string, error) {
 	return statements, nil
 }
 
-func (op *opLogParser) processOpLog(opLog OpLog) ([]string, error) {
+func (op *opLogParser) ProcessOpLog(opLog OpLog) ([]string, error) {
 	switch opLog.Operation {
 	case Insert:
 		return op.handleInsert(opLog)
@@ -120,7 +121,7 @@ func (op *opLogParser) handleInsert(opLog OpLog) ([]string, error) {
 	} else {
 		newFields := make(map[string]any)
 		knownColumns := op.getKnownColumns(opLog.Namespace)
-		for col, value := range opLog.Data {
+		for col, value := range mainData {
 			if !knownColumns[col] {
 				newFields[col] = value
 			}

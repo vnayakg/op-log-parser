@@ -134,6 +134,31 @@ func TestParse(t *testing.T) {
 						"work": "8130097989"
 					}
 				}
+				},
+				{
+				"op": "i",
+				"ns": "test.student",
+				"o": {
+					"_id": "635b79e231d82a8ab1de863b",
+					"name": "Selena Miller",
+					"roll_no": 100,
+					"is_graduated": false,
+					"date_of_birth": "2000-01-30",
+					"address": [
+					{
+						"line1": "481 Harborsburgh",
+						"zip": "89799"
+					},
+					{
+						"line1": "329 Flatside",
+						"zip": "80872"
+					}
+					],
+					"phone": {
+						"personal": "7678456640",
+						"work": "8130097989"
+					}
+				}
 				}]`,
 			expectedSQL: []string{
 				"CREATE SCHEMA test;",
@@ -141,6 +166,10 @@ func TestParse(t *testing.T) {
 				"CREATE TABLE test.student_phone (_id VARCHAR(255) PRIMARY KEY, personal VARCHAR(255), student__id VARCHAR(255), work VARCHAR(255));",
 				"INSERT INTO test.student_phone (_id, personal, student__id, work) VALUES ('random-uuid', '7678456640', '635b79e231d82a8ab1de863b', '8130097989');",
 				"CREATE TABLE test.student_address (_id VARCHAR(255) PRIMARY KEY, line1 VARCHAR(255), student__id VARCHAR(255), zip VARCHAR(255));",
+				"INSERT INTO test.student_address (_id, line1, student__id, zip) VALUES ('random-uuid', '481 Harborsburgh', '635b79e231d82a8ab1de863b', '89799');",
+				"INSERT INTO test.student_address (_id, line1, student__id, zip) VALUES ('random-uuid', '329 Flatside', '635b79e231d82a8ab1de863b', '80872');",
+				"INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 100);",
+				"INSERT INTO test.student_phone (_id, personal, student__id, work) VALUES ('random-uuid', '7678456640', '635b79e231d82a8ab1de863b', '8130097989');",
 				"INSERT INTO test.student_address (_id, line1, student__id, zip) VALUES ('random-uuid', '481 Harborsburgh', '635b79e231d82a8ab1de863b', '89799');",
 				"INSERT INTO test.student_address (_id, line1, student__id, zip) VALUES ('random-uuid', '329 Flatside', '635b79e231d82a8ab1de863b', '80872');",
 				"INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 100);",

@@ -429,10 +429,10 @@ func getSqlType(fieldName string, value any) (string, error) {
 		return "VARCHAR(255)", nil
 	case bool:
 		return "BOOLEAN", nil
-	case float64, int64:
+	case float64, int64, int32, int16, int8:
 		return "FLOAT", nil
 	default:
-		return "", fmt.Errorf("error converting: %v to sql type for field %v", value, fieldName)
+		return "", fmt.Errorf("error converting: %v to sql type for field %v, type: %T", value, fieldName, value)
 	}
 }
 

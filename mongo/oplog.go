@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -29,6 +30,10 @@ func NewClient(ctx context.Context, uri string) (*Client, error) {
 
 func (c *Client) Close(ctx context.Context) error {
 	return c.client.Disconnect(ctx)
+}
+
+func (c *Client) Database(name string) *mongo.Database {
+	return c.client.Database(name)
 }
 
 func StreamOplogsToFile(ctx context.Context, client *Client, p parser.Parser, outputFile string) error {
@@ -58,50 +63,123 @@ func StreamOplogsToPostgres(ctx context.Context, client *Client, p parser.Parser
 	})
 }
 
-var streamOplogs = func(ctx context.Context, client *Client, p parser.Parser, processStmt func(string) error) error {
+var streamOplogs = func (ctx context.Context, client *Client, p parser.Parser, processStmt func(string) error) error {
 	collection := client.client.Database("local").Collection("oplog.rs")
+	log.Println("Starting oplog streaming...")
 
+	// get all existing oplog entries
 	cursor, err := collection.Find(ctx, bson.M{}, options.Find().
-		SetCursorType(options.TailableAwait).
-		SetMaxAwaitTime(0).
-		SetNoCursorTimeout(true))
+		SetSort(bson.M{"$natural": 1}))
 	if err != nil {
-		return fmt.Errorf("creating cursor: %w", err)
+		return fmt.Errorf("creating initial cursor: %w", err)
 	}
 	defer cursor.Close(ctx)
-	log.Println("cursor created.")
+	log.Println("Initial cursor created, processing existing oplog entries...")
+
+	// process existing oplog entries
+	for cursor.Next(ctx) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			var raw bson.M
+			if err := cursor.Decode(&raw); err != nil {
+				log.Printf("Error decoding oplog: %v", err)
+				continue
+			}
+
+			// Skip system operations
+			if ns, ok := raw["ns"].(string); ok && ns == "local.oplog.rs" {
+				continue
+			}
+
+			opLog, err := convertToOpLog(raw)
+			if err != nil {
+				log.Printf("Error converting oplog: %v", err)
+				continue
+			}
+
+			log.Printf("Processing oplog: %s on namespace %s", opLog.Operation, opLog.Namespace)
+			statements, err := p.ProcessOpLog(opLog)
+			if err != nil {
+				log.Printf("Error processing oplog: %v", err)
+				continue
+			}
+
+			for _, stmt := range statements {
+				if err := processStmt(stmt); err != nil {
+					log.Printf("Error processing statement: %v", err)
+					return fmt.Errorf("processing statement: %w", err)
+				}
+				log.Printf("Successfully executed statement: %s", stmt)
+			}
+		}
+	}
+
+	if err := cursor.Err(); err != nil {
+		return fmt.Errorf("initial cursor error: %w", err)
+	}
+
+	// tailable cursor for new oplog entries
+	log.Println("Creating tailable cursor for new oplog entries...")
+	tailableCursor, err := collection.Find(ctx, bson.M{}, options.Find().
+		SetCursorType(options.TailableAwait).
+		SetMaxAwaitTime(1*time.Second).
+		SetNoCursorTimeout(true).
+		SetSort(bson.M{"$natural": 1}))
+	if err != nil {
+		return fmt.Errorf("creating tailable cursor: %w", err)
+	}
+	defer tailableCursor.Close(ctx)
+	log.Println("Tailable cursor created, waiting for new oplog entries...")
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			if !cursor.Next(ctx) {
-				if cursor.Err() != nil {
-					return fmt.Errorf("cursor error: %w", cursor.Err())
+			if !tailableCursor.Next(ctx) {
+				if tailableCursor.Err() != nil {
+					return fmt.Errorf("tailable cursor error: %w", tailableCursor.Err())
 				}
-				continue
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					continue
+				}
 			}
 
 			var raw bson.M
-			if err := cursor.Decode(&raw); err != nil {
-				return fmt.Errorf("decoding oplog: %w", err)
+			if err := tailableCursor.Decode(&raw); err != nil {
+				log.Printf("Error decoding oplog: %v", err)
+				continue
+			}
+
+			// Skip system operations
+			if ns, ok := raw["ns"].(string); ok && ns == "local.oplog.rs" {
+				continue
 			}
 
 			opLog, err := convertToOpLog(raw)
 			if err != nil {
-				return fmt.Errorf("converting oplog: %w", err)
+				log.Printf("Error converting oplog: %v", err)
+				continue
 			}
 
+			log.Printf("Processing new oplog: %s on namespace %s", opLog.Operation, opLog.Namespace)
 			statements, err := p.ProcessOpLog(opLog)
 			if err != nil {
-				log.Printf("processing oplog: %v", err)
+				log.Printf("Error processing oplog: %v", err)
+				continue
 			}
 
 			for _, stmt := range statements {
 				if err := processStmt(stmt); err != nil {
+					log.Printf("Error processing statement: %v", err)
 					return fmt.Errorf("processing statement: %w", err)
 				}
+				log.Printf("Successfully executed statement: %s", stmt)
 			}
 		}
 	}

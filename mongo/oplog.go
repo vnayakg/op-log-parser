@@ -11,6 +11,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 
 	"op-log-parser/parser"
+	"op-log-parser/postgres"
 )
 
 type Client struct {
@@ -49,6 +50,12 @@ func StreamOplogsToFile(ctx context.Context, client *Client, p parser.Parser, ou
 	}
 
 	return nil
+}
+
+func StreamOplogsToPostgres(ctx context.Context, client *Client, p parser.Parser, pg *postgres.Executor) error {
+	return streamOplogs(ctx, client, p, func(stmt string) error {
+		return pg.Execute(ctx, stmt)
+	})
 }
 
 var streamOplogs = func(ctx context.Context, client *Client, p parser.Parser, processStmt func(string) error) error {

@@ -91,13 +91,20 @@ var streamOplogs = func(ctx context.Context, client *Client, p parser.Parser, pr
 	collection := client.client.Database("local").Collection("oplog.rs")
 	log.Println("Starting oplog streaming...")
 
+	// Get the latest oplog timestamp
+	var lastTimestamp bson.M
+	err := collection.FindOne(ctx, bson.M{}, options.FindOne().SetSort(bson.M{"$natural": -1})).Decode(&lastTimestamp)
+	if err != nil {
+		return fmt.Errorf("getting latest oplog timestamp: %w", err)
+	}
+
 	// Process existing oplog entries
 	if err := processExistingOplogs(ctx, collection, p, processStmt); err != nil {
 		return fmt.Errorf("processing existing oplogs: %w", err)
 	}
 
-	// Stream new oplog entries
-	return streamNewOplogs(ctx, collection, p, processStmt)
+	// Stream new oplog entries starting from the last processed timestamp
+	return streamNewOplogs(ctx, collection, p, processStmt, lastTimestamp["ts"])
 }
 
 // processExistingOplogs processes all existing oplog entries
@@ -131,11 +138,17 @@ func processExistingOplogs(ctx context.Context, collection *mongo.Collection, p 
 	return cursor.Err()
 }
 
-func streamNewOplogs(ctx context.Context, collection *mongo.Collection, p parser.Parser, processStmt func(string) error) error {
+func streamNewOplogs(ctx context.Context, collection *mongo.Collection, p parser.Parser, processStmt func(string) error, lastTimestamp interface{}) error {
 	log.Println("Creating tailable cursor for new oplog entries...")
-	tailableCursor, err := collection.Find(ctx, bson.M{}, options.Find().
+
+	// Create a filter to only get oplog entries after the last processed timestamp
+	filter := bson.M{
+		"ts": bson.M{"$gt": lastTimestamp},
+	}
+
+	tailableCursor, err := collection.Find(ctx, filter, options.Find().
 		SetCursorType(options.TailableAwait).
-		SetMaxAwaitTime(1*time.Second).
+		SetMaxAwaitTime(time.Second).
 		SetNoCursorTimeout(true).
 		SetSort(bson.M{"$natural": 1}))
 	if err != nil {
@@ -193,23 +206,28 @@ func convertToOpLog(raw bson.M) (parser.OpLog, error) {
 		return parser.OpLog{}, fmt.Errorf("unmarshaling o field: %w", err)
 	}
 
-	rawO2, ok := raw["o2"]
-	if !ok {
-		return parser.OpLog{}, fmt.Errorf("invalid o2 field")
-	}
-	o2Bytes, err := bson.Marshal(rawO2)
-	if err != nil {
-		return parser.OpLog{}, fmt.Errorf("marshaling o2 field: %w", err)
-	}
-	var o2Data parser.O2Field
-	if err := bson.Unmarshal(o2Bytes, &o2Data); err != nil {
-		return parser.OpLog{}, fmt.Errorf("unmarshaling o2 field: %w", err)
+	// Only process o2 field for update operations
+	var o2Data *parser.O2Field
+	if op == "u" {
+		rawO2, ok := raw["o2"]
+		if !ok {
+			return parser.OpLog{}, fmt.Errorf("invalid o2 field for update operation")
+		}
+		o2Bytes, err := bson.Marshal(rawO2)
+		if err != nil {
+			return parser.OpLog{}, fmt.Errorf("marshaling o2 field: %w", err)
+		}
+		var o2 parser.O2Field
+		if err := bson.Unmarshal(o2Bytes, &o2); err != nil {
+			return parser.OpLog{}, fmt.Errorf("unmarshaling o2 field: %w", err)
+		}
+		o2Data = &o2
 	}
 
 	return parser.OpLog{
 		Operation: op,
 		Namespace: ns,
 		Data:      data,
-		O2:        &o2Data,
+		O2:        o2Data,
 	}, nil
 }

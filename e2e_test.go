@@ -92,36 +92,8 @@ func TestE2E(t *testing.T) {
 			return
 		}
 		defer conn.Close(ctx)
-
-		// Get all schemas except system schemas
-		rows, err := conn.Query(ctx, `
-			SELECT schema_name 
-			FROM information_schema.schemata 
-			WHERE schema_name NOT IN ('information_schema', 'pg_catalog', 'pg_toast')
-		`)
-		if err != nil {
-			t.Logf("Error querying schemas: %v", err)
-			return
-		}
-		defer rows.Close()
-
-		var schemas []string
-		for rows.Next() {
-			var schema string
-			if err := rows.Scan(&schema); err != nil {
-				t.Logf("Error scanning schema: %v", err)
-				continue
-			}
-			schemas = append(schemas, schema)
-		}
-
-		// Drop each schema
-		for _, schema := range schemas {
-			_, err := conn.Exec(ctx, fmt.Sprintf("DROP SCHEMA %s CASCADE", schema))
-			if err != nil {
-				t.Logf("Error dropping schema %s: %v", schema, err)
-			}
-		}
+		conn.Exec(ctx, "DROP SCHEMA test CASCADE")
+		t.Log("postgres cleanup completed...")
 	}
 
 	t.Run("File to File", func(t *testing.T) {
@@ -139,7 +111,6 @@ func TestE2E(t *testing.T) {
 		assert.NoError(t, err)
 
 		normalizedContent := re.ReplaceAllString(string(sqlOutput), "<UUID>")
-		fmt.Println("normalized content", normalizedContent)
 		expectedFragments := []string{
 			"CREATE SCHEMA test;",
 			"CREATE TABLE test.student (_id VARCHAR(255) PRIMARY KEY, date_of_birth VARCHAR(255), is_graduated BOOLEAN, name VARCHAR(255), roll_no FLOAT);",
@@ -267,11 +238,9 @@ func TestE2E(t *testing.T) {
 			close(done)
 		}()
 
-		// Wait for some oplogs to be written
 		t.Log("Waiting for oplogs to be written...")
 		time.Sleep(2 * time.Second)
 
-		// Send SIGTERM to stop the parser
 		t.Log("Sending interrupt signal...")
 		if cmd.Process != nil {
 			err = cmd.Process.Signal(os.Interrupt)
@@ -302,7 +271,7 @@ func TestE2E(t *testing.T) {
 			}
 		}
 
-		// Verify PostgreSQL state
+		// assert
 		t.Log("Verifying PostgreSQL state...")
 		conn, err := pgx.Connect(ctx, postgresURI)
 		assert.NoError(t, err)
@@ -334,6 +303,9 @@ func populateMongoDB(ctx context.Context, uri string) error {
 		"_id":  "test-id-1",
 		"name": "Test User",
 	})
+
+	// _, err = collection.DeleteOne(ctx, bson.M{
+	// 	"_id": "test-id-1"})
 	if err != nil {
 		return fmt.Errorf("inserting test data: %w", err)
 	}

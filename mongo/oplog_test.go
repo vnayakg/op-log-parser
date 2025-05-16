@@ -77,9 +77,6 @@ func TestConvertToOpLog(t *testing.T) {
 					"is_graduated":  false,
 					"date_of_birth": "2000-01-30",
 				},
-				"o2": bson.M{
-					"_id": "635b79e231d82a8ab1de863b",
-				},
 			},
 			expected: parser.OpLog{
 				Operation: "i",
@@ -91,7 +88,7 @@ func TestConvertToOpLog(t *testing.T) {
 					"is_graduated":  false,
 					"date_of_birth": "2000-01-30",
 				},
-				O2: &parser.O2Field{ID: "635b79e231d82a8ab1de863b"},
+				O2: nil,
 			},
 			err: "",
 		},
@@ -134,7 +131,7 @@ func TestConvertToOpLog(t *testing.T) {
 			err:      "marshaling o field",
 		},
 		{
-			name: "Missing o2 field",
+			name: "Missing o2 field for other than update oplog",
 			input: bson.M{
 				"op": "i",
 				"ns": "test.student",
@@ -150,7 +147,17 @@ func TestConvertToOpLog(t *testing.T) {
 				},
 				O2: nil,
 			},
-			err: "invalid o2 field",
+		},
+		{
+			name: "Missing o2 field for update oplog",
+			input: bson.M{
+				"op": "u",
+				"ns": "test.student",
+				"o": bson.M{
+					"_id": "635b79e231d82a8ab1de863b",
+				},
+			},
+			err: "invalid o2 field for update operation",
 		},
 	}
 

@@ -43,31 +43,65 @@ func StreamOplogsToFile(ctx context.Context, client *Client, p parser.Parser, ou
 	}
 	defer file.Close()
 
-	err = streamOplogs(ctx, client, p, func(stmt string) error {
+	return streamOplogs(ctx, client, p, func(stmt string) error {
 		sqlLine := stmt + "\n"
 		if _, err := file.WriteString(sqlLine); err != nil {
 			return fmt.Errorf("writing to file: %w", err)
 		}
 		return file.Sync()
 	})
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
 
+// StreamOplogsToPostgres streams MongoDB oplogs to PostgreSQL
 func StreamOplogsToPostgres(ctx context.Context, client *Client, p parser.Parser, pg *postgres.Executor) error {
 	return streamOplogs(ctx, client, p, func(stmt string) error {
 		return pg.Execute(ctx, stmt)
 	})
 }
 
-var streamOplogs = func (ctx context.Context, client *Client, p parser.Parser, processStmt func(string) error) error {
+// processOplogEntry processes a single oplog entry and returns any error encountered
+func processOplogEntry(ctx context.Context, raw bson.M, p parser.Parser, processStmt func(string) error) error {
+	// Skip system operations
+	if ns, ok := raw["ns"].(string); ok && ns == "local.oplog.rs" {
+		return nil
+	}
+
+	opLog, err := convertToOpLog(raw)
+	if err != nil {
+		return fmt.Errorf("converting oplog: %w", err)
+	}
+
+	log.Printf("Processing oplog: %s on namespace %s", opLog.Operation, opLog.Namespace)
+	statements, err := p.ProcessOpLog(opLog)
+	if err != nil {
+		return fmt.Errorf("processing oplog: %w", err)
+	}
+
+	for _, stmt := range statements {
+		if err := processStmt(stmt); err != nil {
+			return fmt.Errorf("processing statement: %w", err)
+		}
+		log.Printf("Successfully executed statement: %s", stmt)
+	}
+	return nil
+}
+
+// streamOplogs handles the core oplog streaming logic
+var streamOplogs = func(ctx context.Context, client *Client, p parser.Parser, processStmt func(string) error) error {
 	collection := client.client.Database("local").Collection("oplog.rs")
 	log.Println("Starting oplog streaming...")
 
-	// get all existing oplog entries
+	// Process existing oplog entries
+	if err := processExistingOplogs(ctx, collection, p, processStmt); err != nil {
+		return fmt.Errorf("processing existing oplogs: %w", err)
+	}
+
+	// Stream new oplog entries
+	return streamNewOplogs(ctx, collection, p, processStmt)
+}
+
+// processExistingOplogs processes all existing oplog entries
+func processExistingOplogs(ctx context.Context, collection *mongo.Collection, p parser.Parser, processStmt func(string) error) error {
 	cursor, err := collection.Find(ctx, bson.M{}, options.Find().
 		SetSort(bson.M{"$natural": 1}))
 	if err != nil {
@@ -76,7 +110,6 @@ var streamOplogs = func (ctx context.Context, client *Client, p parser.Parser, p
 	defer cursor.Close(ctx)
 	log.Println("Initial cursor created, processing existing oplog entries...")
 
-	// process existing oplog entries
 	for cursor.Next(ctx) {
 		select {
 		case <-ctx.Done():
@@ -88,39 +121,17 @@ var streamOplogs = func (ctx context.Context, client *Client, p parser.Parser, p
 				continue
 			}
 
-			// Skip system operations
-			if ns, ok := raw["ns"].(string); ok && ns == "local.oplog.rs" {
+			if err := processOplogEntry(ctx, raw, p, processStmt); err != nil {
+				log.Printf("Error processing oplog entry: %v", err)
 				continue
-			}
-
-			opLog, err := convertToOpLog(raw)
-			if err != nil {
-				log.Printf("Error converting oplog: %v", err)
-				continue
-			}
-
-			log.Printf("Processing oplog: %s on namespace %s", opLog.Operation, opLog.Namespace)
-			statements, err := p.ProcessOpLog(opLog)
-			if err != nil {
-				log.Printf("Error processing oplog: %v", err)
-				continue
-			}
-
-			for _, stmt := range statements {
-				if err := processStmt(stmt); err != nil {
-					log.Printf("Error processing statement: %v", err)
-					return fmt.Errorf("processing statement: %w", err)
-				}
-				log.Printf("Successfully executed statement: %s", stmt)
 			}
 		}
 	}
 
-	if err := cursor.Err(); err != nil {
-		return fmt.Errorf("initial cursor error: %w", err)
-	}
+	return cursor.Err()
+}
 
-	// tailable cursor for new oplog entries
+func streamNewOplogs(ctx context.Context, collection *mongo.Collection, p parser.Parser, processStmt func(string) error) error {
 	log.Println("Creating tailable cursor for new oplog entries...")
 	tailableCursor, err := collection.Find(ctx, bson.M{}, options.Find().
 		SetCursorType(options.TailableAwait).
@@ -142,12 +153,7 @@ var streamOplogs = func (ctx context.Context, client *Client, p parser.Parser, p
 				if tailableCursor.Err() != nil {
 					return fmt.Errorf("tailable cursor error: %w", tailableCursor.Err())
 				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				default:
-					continue
-				}
+				continue
 			}
 
 			var raw bson.M
@@ -156,30 +162,9 @@ var streamOplogs = func (ctx context.Context, client *Client, p parser.Parser, p
 				continue
 			}
 
-			// Skip system operations
-			if ns, ok := raw["ns"].(string); ok && ns == "local.oplog.rs" {
+			if err := processOplogEntry(ctx, raw, p, processStmt); err != nil {
+				log.Printf("Error processing oplog entry: %v", err)
 				continue
-			}
-
-			opLog, err := convertToOpLog(raw)
-			if err != nil {
-				log.Printf("Error converting oplog: %v", err)
-				continue
-			}
-
-			log.Printf("Processing new oplog: %s on namespace %s", opLog.Operation, opLog.Namespace)
-			statements, err := p.ProcessOpLog(opLog)
-			if err != nil {
-				log.Printf("Error processing oplog: %v", err)
-				continue
-			}
-
-			for _, stmt := range statements {
-				if err := processStmt(stmt); err != nil {
-					log.Printf("Error processing statement: %v", err)
-					return fmt.Errorf("processing statement: %w", err)
-				}
-				log.Printf("Successfully executed statement: %s", stmt)
 			}
 		}
 	}
@@ -220,13 +205,11 @@ func convertToOpLog(raw bson.M) (parser.OpLog, error) {
 	if err := bson.Unmarshal(o2Bytes, &o2Data); err != nil {
 		return parser.OpLog{}, fmt.Errorf("unmarshaling o2 field: %w", err)
 	}
-	o2 := o2Data
-	fmt.Println(rawO2, o2Data)
 
 	return parser.OpLog{
 		Operation: op,
 		Namespace: ns,
 		Data:      data,
-		O2:        &o2,
+		O2:        &o2Data,
 	}, nil
 }

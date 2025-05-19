@@ -64,7 +64,6 @@ func TestE2E(t *testing.T) {
 	defer func() { assert.NoError(t, postgresContainer.Terminate(ctx)) }()
 	time.Sleep(time.Second * 5)
 	postgresURI, err := postgresContainer.ConnectionString(ctx, "sslmode=disable")
-	fmt.Println(postgresURI)
 	assert.NoError(t, err)
 
 	// temporary directories and files
@@ -97,7 +96,7 @@ func TestE2E(t *testing.T) {
 	}
 
 	t.Run("File to File", func(t *testing.T) {
-		cmd := exec.Command("go", "run", "./main.go",
+		cmd := exec.Command("go", "run", "./cmd/main.go",
 			"-input-type", "file",
 			"-input-file", inputFile,
 			"-output-type", "file",
@@ -125,7 +124,7 @@ func TestE2E(t *testing.T) {
 
 	t.Run("File to PostgreSQL", func(t *testing.T) {
 		cleanupPostgres()
-		cmd := exec.Command("go", "run", "./main.go",
+		cmd := exec.Command("go", "run", "./cmd/main.go",
 			"-input-type", "file",
 			"-input-file", inputFile,
 			"-output-type", "postgres",
@@ -166,7 +165,7 @@ func TestE2E(t *testing.T) {
 
 		// Run parser in background to stream oplogs
 		mongoOutputFile := filepath.Join(tempDir, "mongo-output.sql")
-		cmd := exec.Command("go", "run", "./main.go",
+		cmd := exec.Command("go", "run", "./cmd/main.go",
 			"-input-type", "mongo",
 			"-mongo-uri", mongoURI,
 			"-output-type", "file",
@@ -212,7 +211,7 @@ func TestE2E(t *testing.T) {
 
 	t.Run("MongoDB to PostgreSQL", func(t *testing.T) {
 		cleanupPostgres()
-		cmd := exec.Command("go", "run", "./main.go",
+		cmd := exec.Command("go", "run", "./cmd/main.go",
 			"-input-type", "mongo",
 			"-mongo-uri", mongoURI,
 			"-output-type", "postgres",

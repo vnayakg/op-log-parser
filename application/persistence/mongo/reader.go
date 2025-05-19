@@ -1,12 +1,13 @@
-package reader
+package mongo
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 
-	"op-log-parser/parser"
+	"op-log-parser/application/ports"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -15,10 +16,10 @@ import (
 
 type MongoReader struct {
 	client *mongo.Client
-	config Config
+	config ports.ReaderConfig
 }
 
-func NewMongoReader(config Config) (Reader, error) {
+func NewReader(config ports.ReaderConfig) (ports.Reader, error) {
 	if config.MongoURI == "" {
 		return nil, fmt.Errorf("MongoURI is required")
 	}
@@ -43,8 +44,8 @@ func NewMongoReader(config Config) (Reader, error) {
 	}, nil
 }
 
-func (r *MongoReader) Read(ctx context.Context) (<-chan parser.OpLog, <-chan error) {
-	oplogChan := make(chan parser.OpLog)
+func (r *MongoReader) Read(ctx context.Context) (<-chan string, <-chan error) {
+	oplogChan := make(chan string)
 	errChan := make(chan error, 1)
 
 	go func() {
@@ -57,16 +58,20 @@ func (r *MongoReader) Read(ctx context.Context) (<-chan parser.OpLog, <-chan err
 		var lastTimestamp bson.M
 		err := collection.FindOne(ctx, bson.M{}, options.FindOne().SetSort(bson.M{"$natural": -1})).Decode(&lastTimestamp)
 		if err != nil {
+			log.Printf("Error getting latest oplog timestamp: %v", err)
 			errChan <- fmt.Errorf("getting latest oplog timestamp: %v", err)
 			return
 		}
+		log.Printf("Latest oplog timestamp: %v", lastTimestamp)
 
 		if err := r.processExistingOplogs(ctx, collection, oplogChan); err != nil {
+			log.Printf("Error processing existing oplogs: %v", err)
 			errChan <- fmt.Errorf("processing existing oplogs: %v", err)
 			return
 		}
 
 		if err := r.streamNewOplogs(ctx, collection, oplogChan, lastTimestamp["ts"]); err != nil {
+			log.Printf("Error streaming new oplogs: %v", err)
 			errChan <- fmt.Errorf("streaming new oplogs: %v", err)
 			return
 		}
@@ -75,7 +80,7 @@ func (r *MongoReader) Read(ctx context.Context) (<-chan parser.OpLog, <-chan err
 	return oplogChan, errChan
 }
 
-func (r *MongoReader) processExistingOplogs(ctx context.Context, collection *mongo.Collection, oplogChan chan<- parser.OpLog) error {
+func (r *MongoReader) processExistingOplogs(ctx context.Context, collection *mongo.Collection, oplogChan chan<- string) error {
 	cursor, err := collection.Find(ctx, bson.M{}, options.Find().
 		SetSort(bson.M{"$natural": 1}))
 	if err != nil {
@@ -99,14 +104,11 @@ func (r *MongoReader) processExistingOplogs(ctx context.Context, collection *mon
 				continue
 			}
 
-			oplog, err := r.convertToOpLog(raw)
-			if err != nil {
-				log.Printf("Error converting oplog: %v", err)
-				continue
-			}
-
+			// Wrap the oplog entry in an array
+			oplogArray := []bson.M{raw}
+			dataBytes, _ := json.Marshal(oplogArray)
 			select {
-			case oplogChan <- oplog:
+			case oplogChan <- string(dataBytes):
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -116,7 +118,7 @@ func (r *MongoReader) processExistingOplogs(ctx context.Context, collection *mon
 	return cursor.Err()
 }
 
-func (r *MongoReader) streamNewOplogs(ctx context.Context, collection *mongo.Collection, oplogChan chan<- parser.OpLog, lastTimestamp interface{}) error {
+func (r *MongoReader) streamNewOplogs(ctx context.Context, collection *mongo.Collection, oplogChan chan<- string, lastTimestamp interface{}) error {
 	log.Println("Creating tailable cursor for new oplog entries...")
 
 	filter := bson.M{
@@ -156,67 +158,16 @@ func (r *MongoReader) streamNewOplogs(ctx context.Context, collection *mongo.Col
 				continue
 			}
 
-			oplog, err := r.convertToOpLog(raw)
-			if err != nil {
-				log.Printf("Error converting oplog: %v", err)
-				continue
-			}
-
+			// Wrap the oplog entry in an array
+			oplogArray := []bson.M{raw}
+			dataBytes, _ := json.Marshal(oplogArray)
 			select {
-			case oplogChan <- oplog:
+			case oplogChan <- string(dataBytes):
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
 	}
-}
-
-func (r *MongoReader) convertToOpLog(raw bson.M) (parser.OpLog, error) {
-	op, ok := raw["op"].(string)
-	if !ok {
-		return parser.OpLog{}, fmt.Errorf("invalid op field")
-	}
-	ns, ok := raw["ns"].(string)
-	if !ok {
-		return parser.OpLog{}, fmt.Errorf("invalid ns field")
-	}
-
-	dataRaw, ok := raw["o"]
-	if !ok {
-		return parser.OpLog{}, fmt.Errorf("invalid o field")
-	}
-	dataBytes, err := bson.Marshal(dataRaw)
-	if err != nil {
-		return parser.OpLog{}, fmt.Errorf("marshaling o field: %v", err)
-	}
-	var data map[string]any
-	if err := bson.Unmarshal(dataBytes, &data); err != nil {
-		return parser.OpLog{}, fmt.Errorf("unmarshaling o field: %v", err)
-	}
-
-	var o2Data *parser.O2Field
-	if op == "u" {
-		rawO2, ok := raw["o2"]
-		if !ok {
-			return parser.OpLog{}, fmt.Errorf("invalid o2 field for update operation")
-		}
-		o2Bytes, err := bson.Marshal(rawO2)
-		if err != nil {
-			return parser.OpLog{}, fmt.Errorf("marshaling o2 field: %v", err)
-		}
-		var o2 parser.O2Field
-		if err := bson.Unmarshal(o2Bytes, &o2); err != nil {
-			return parser.OpLog{}, fmt.Errorf("unmarshaling o2 field: %v", err)
-		}
-		o2Data = &o2
-	}
-
-	return parser.OpLog{
-		Operation: op,
-		Namespace: ns,
-		Data:      data,
-		O2:        o2Data,
-	}, nil
 }
 
 func (r *MongoReader) Close() error {

@@ -1,4 +1,4 @@
-package parser
+package parsers
 
 import (
 	"errors"
@@ -304,7 +304,7 @@ func TestParse(t *testing.T) {
 			uuidGenerator := func() string {
 				return uuid
 			}
-			parser := CreateParser(uuidGenerator)
+			parser := NewParser(uuidGenerator)
 			actualSQL, err := parser.Parse(tc.inputJSON)
 
 			if tc.expectedErr != nil {

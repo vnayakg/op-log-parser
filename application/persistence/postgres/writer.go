@@ -1,8 +1,9 @@
-package writer
+package postgres
 
 import (
 	"context"
 	"database/sql"
+	"op-log-parser/application/ports"
 	"strings"
 	"time"
 
@@ -11,10 +12,10 @@ import (
 
 type PostgresWriter struct {
 	db     *sql.DB
-	config Config
+	config ports.WriterConfig
 }
 
-func NewPostgresWriter(config Config) (Writer, error) {
+func NewWriter(config ports.WriterConfig) (ports.Writer, error) {
 	db, err := sql.Open("postgres", config.PostgresURI)
 	if err != nil {
 		return nil, err

@@ -1,8 +1,9 @@
-package parser
+package parsers
 
 import (
 	"encoding/json"
 	"fmt"
+	"op-log-parser/application/domain/models"
 	"sort"
 	"strings"
 )
@@ -32,7 +33,7 @@ type O2Field struct {
 
 type Parser interface {
 	Parse(oplogJson string) ([]string, error)
-	ProcessOpLog(opLog OpLog) ([]string, error)
+	ProcessOpLog(opLog models.OpLog) ([]string, error)
 }
 
 type opLogParser struct {
@@ -43,7 +44,7 @@ type opLogParser struct {
 
 type UUIDGenerator func() string
 
-func CreateParser(uuidGenerator UUIDGenerator) Parser {
+func NewParser(uuidGenerator UUIDGenerator) Parser {
 	return &opLogParser{
 		ddlTracker:     make(map[string]bool),
 		columnsTracker: make(map[string]map[string]bool),
@@ -52,7 +53,7 @@ func CreateParser(uuidGenerator UUIDGenerator) Parser {
 }
 
 func (op *opLogParser) Parse(opLogJson string) ([]string, error) {
-	var opLogs []OpLog
+	var opLogs []models.OpLog
 	if err := json.Unmarshal([]byte(opLogJson), &opLogs); err != nil {
 		return nil, fmt.Errorf("Error unmarshaling oplog")
 	}
@@ -68,7 +69,7 @@ func (op *opLogParser) Parse(opLogJson string) ([]string, error) {
 	return statements, nil
 }
 
-func (op *opLogParser) ProcessOpLog(opLog OpLog) ([]string, error) {
+func (op *opLogParser) ProcessOpLog(opLog models.OpLog) ([]string, error) {
 	switch opLog.Operation {
 	case Insert:
 		return op.handleInsert(opLog)
@@ -81,7 +82,7 @@ func (op *opLogParser) ProcessOpLog(opLog OpLog) ([]string, error) {
 	}
 }
 
-func (op *opLogParser) handleInsert(opLog OpLog) ([]string, error) {
+func (op *opLogParser) handleInsert(opLog models.OpLog) ([]string, error) {
 	schema, table, err := parseNamespace(opLog.Namespace)
 	if err != nil {
 		return nil, err
@@ -161,7 +162,7 @@ func (op *opLogParser) handleInsert(opLog OpLog) ([]string, error) {
 	return statements, nil
 }
 
-func (op *opLogParser) handleUpdate(opLog OpLog) ([]string, error) {
+func (op *opLogParser) handleUpdate(opLog models.OpLog) ([]string, error) {
 	if opLog.O2 == nil || opLog.O2.ID == "" {
 		return nil, fmt.Errorf("_id field is missing")
 	}
@@ -203,7 +204,7 @@ func (op *opLogParser) handleUpdate(opLog OpLog) ([]string, error) {
 		schema, table, strings.Join(setClauses, ", "), opLog.O2.ID)}, nil
 }
 
-func (op *opLogParser) handleDelete(opLog OpLog) ([]string, error) {
+func (op *opLogParser) handleDelete(opLog models.OpLog) ([]string, error) {
 	id, ok := opLog.Data[fieldID]
 	if !ok {
 		return nil, fmt.Errorf("_id field is missing")
